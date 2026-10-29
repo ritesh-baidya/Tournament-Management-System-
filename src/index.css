@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-heading: 'Rajdhani', sans-serif;
+    --font-display: 'Orbitron', sans-serif;
+    --font-body: 'Inter', sans-serif;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #0B0E14;
+    color: #F3F4F6;
+  }
+
+  h1, h2, h3, .font-heading {
+    font-family: var(--font-heading);
+    letter-spacing: 0.05em;
+  }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+/* Custom Scrollbar for sleek Esports tables */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #111827;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1F2937;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #10B981;
+}
+
+/* Neon glow utilities */
+.neon-glow-green {
+  box-shadow: 0 0 15px rgba(16, 185, 129, 0.35), 0 0 30px rgba(16, 185, 129, 0.15);
+}
+
+.neon-border-green {
+  border-color: #10B981;
+  box-shadow: inset 0 0 10px rgba(16, 185, 129, 0.2), 0 0 15px rgba(16, 185, 129, 0.25);
+}
+
+.neon-text-green {
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
+}
+
+.esports-card {
+  background: linear-gradient(135deg, rgba(18, 24, 38, 0.85) 0%, rgba(15, 20, 32, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(12px);
+}
+
+.esports-card-hover:hover {
+  border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(16, 185, 129, 0.15);
+}

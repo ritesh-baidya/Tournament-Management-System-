@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+*.db
+*.db.tmp
+*.tmp_*
+.DS_Store
