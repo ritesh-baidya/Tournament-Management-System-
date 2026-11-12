@@ -44,15 +44,42 @@ async function createWindow() {
     mainWindow?.show();
   });
 
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+  const distIndex = path.join(__dirname, '../dist/index.html');
+  if (process.env.VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  } else if (fs.existsSync(distIndex)) {
+    mainWindow.loadFile(distIndex);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadURL('http://localhost:5173');
   }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+// Automatic Excel Synchronization after any tournament change
+let lastImportedExcelPath: string | null = null;
+
+function autoSyncExcel() {
+  try {
+    if (!db) return;
+    const buffer = ExcelService.generateTournamentWorkbook(db);
+    const syncDir = isDev ? process.cwd() : app.getPath('userData');
+    const syncPath = path.join(syncDir, 'tournament_master_sync.xlsx');
+    ExcelService.safeSaveFile(syncPath, buffer);
+
+    const savedPath = lastImportedExcelPath || db.getSetting('last_imported_excel_path');
+    if (savedPath && fs.existsSync(savedPath)) {
+      try {
+        ExcelService.safeSaveFile(savedPath, buffer);
+      } catch (err) {
+        console.error('Auto Excel sync to imported file error:', err);
+      }
+    }
+  } catch (err) {
+    console.error('Auto Excel sync error:', err);
+  }
 }
 
 // Register IPC handlers
@@ -107,9 +134,17 @@ function registerIpcHandlers() {
     }
   });
 
-  ipcMain.handle('db:getEligibleTeams', async () => {
+  ipcMain.handle('db:getEligibleTeams', async (_, args?: { stage?: any; allowRepeat?: boolean } | string) => {
     try {
-      const teams = db.getEligibleTeams();
+      let stage: any = undefined;
+      let allowRepeat = false;
+      if (typeof args === 'string') {
+        stage = args;
+      } else if (args && typeof args === 'object') {
+        stage = args.stage;
+        allowRepeat = Boolean(args.allowRepeat);
+      }
+      const teams = db.getEligibleTeams(stage, allowRepeat);
       return { success: true, data: teams };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -137,6 +172,96 @@ function registerIpcHandlers() {
   ipcMain.handle('db:updateTeamStatus', async (_, { teamId, status, reason }) => {
     try {
       db.updateTeamStatus(teamId, status, reason);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:updateTeamQualification', async (_, { teamId, status, currentStage }) => {
+    try {
+      db.updateTeamQualification(teamId, status, currentStage);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:advanceTeamStage', async (_, { teamId, nextStage }) => {
+    try {
+      db.advanceTeamStage(teamId, nextStage);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:batchUpdateTeamQualification', async (_, { teamIds, status, currentStage }) => {
+    try {
+      db.batchUpdateTeamQualification(teamIds, status, currentStage);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:batchAdvanceTeamStage', async (_, { teamIds, nextStage }) => {
+    try {
+      db.batchAdvanceTeamStage(teamIds, nextStage);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:getTeamMatchHistory', async (_, teamId: string) => {
+    try {
+      const history = db.getTeamMatchHistory(teamId);
+      return { success: true, data: history };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:deleteTeam', async (_, teamId: string) => {
+    try {
+      db.deleteTeam(teamId);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:addTeam', async (_, { teamName, captainName, captainDiscordId }) => {
+    try {
+      const team = db.addTeam(teamName, captainName, captainDiscordId || '');
+      autoSyncExcel();
+      return { success: true, data: team };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:addPlayer', async (_, { teamId, playerName, role, isCaptain, extraInfo }) => {
+    try {
+      const player = db.addPlayer(teamId, playerName, role, isCaptain, extraInfo);
+      autoSyncExcel();
+      return { success: true, data: player };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:deletePlayer', async (_, playerId: string) => {
+    try {
+      db.deletePlayer(playerId);
+      autoSyncExcel();
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -146,6 +271,7 @@ function registerIpcHandlers() {
   ipcMain.handle('db:resetRotation', async (_, policy: 'one_time' | 'recurring_cycle') => {
     try {
       db.resetRotation(policy);
+      autoSyncExcel();
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -162,9 +288,18 @@ function registerIpcHandlers() {
     }
   });
 
-  ipcMain.handle('db:createDraw', async (_, targetCount: number = 12) => {
+  ipcMain.handle('db:createDraw', async (_, arg1?: any, arg2?: any) => {
     try {
-      const draw = db.createDraw(targetCount);
+      let targetCount = 12;
+      let stage: any = 'qualifying';
+      if (typeof arg1 === 'object' && arg1 !== null) {
+        targetCount = arg1.targetCount || 12;
+        stage = arg1.stage || 'qualifying';
+      } else {
+        if (typeof arg1 === 'number') targetCount = arg1;
+        if (typeof arg2 === 'string') stage = arg2;
+      }
+      const draw = db.createDraw(targetCount, stage);
       return { success: true, data: draw };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -174,7 +309,18 @@ function registerIpcHandlers() {
   ipcMain.handle('db:recordSelection', async (_, { drawId, teamId, order }) => {
     try {
       const selection = db.recordSelection(drawId, teamId, order);
+      autoSyncExcel();
       return { success: true, data: selection };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:recordSelectionBatch', async (_, { drawId, teamIds, startingOrder }) => {
+    try {
+      const selections = db.recordSelectionBatch(drawId, teamIds, startingOrder || 1);
+      autoSyncExcel();
+      return { success: true, data: selections };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -183,6 +329,7 @@ function registerIpcHandlers() {
   ipcMain.handle('db:finalizeDraw', async (_, drawId: string) => {
     try {
       db.finalizeDraw(drawId);
+      autoSyncExcel();
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -216,6 +363,27 @@ function registerIpcHandlers() {
       const winnerIndex = getCryptoRandomInt(0, eligiblePoolIds.length);
       const winnerId = eligiblePoolIds[winnerIndex];
       return { success: true, data: { winnerId, winnerIndex } };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('crypto:selectMultipleWinners', async (_, { eligiblePoolIds, count }: { eligiblePoolIds: string[]; count: number }) => {
+    try {
+      if (!eligiblePoolIds || eligiblePoolIds.length === 0 || count <= 0) {
+        throw new Error('Eligible pool is empty or count is invalid');
+      }
+      const pool = [...eligiblePoolIds];
+      const selected: string[] = [];
+      const selectCount = Math.min(count, pool.length);
+      for (let i = 0; i < selectCount; i++) {
+        const randIdx = getCryptoRandomInt(i, pool.length);
+        const temp = pool[i];
+        pool[i] = pool[randIdx];
+        pool[randIdx] = temp;
+        selected.push(pool[i]);
+      }
+      return { success: true, data: { winnerTeamIds: selected } };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -261,6 +429,7 @@ function registerIpcHandlers() {
   ipcMain.handle('db:completeMatch', async (_, { matchId, teams, players, notes }) => {
     try {
       const res = db.completeMatch(matchId, teams, players, notes);
+      autoSyncExcel();
       return { success: true, data: res };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -271,6 +440,26 @@ function registerIpcHandlers() {
     try {
       const list = db.getMatchTeamParticipation(matchId);
       return { success: true, data: list };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:deleteMatch', async (_, matchId: string) => {
+    try {
+      db.deleteMatch(matchId);
+      autoSyncExcel();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:clearAllMatches', async () => {
+    try {
+      db.clearAllMatches();
+      autoSyncExcel();
+      return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -290,6 +479,10 @@ function registerIpcHandlers() {
       }
 
       const filePath = res.filePaths[0];
+      lastImportedExcelPath = filePath;
+      try {
+        db.setSetting('last_imported_excel_path', filePath);
+      } catch {}
       const buffer = fs.readFileSync(filePath);
       const existingTeams = db.getAllTeams();
       const preview = ExcelService.parseExcelBuffer(buffer, existingTeams);
@@ -300,8 +493,11 @@ function registerIpcHandlers() {
     }
   });
 
-  ipcMain.handle('excel:commitImport', async (_, teams) => {
+  ipcMain.handle('excel:commitImport', async (_, teams, mode: 'replace' | 'append' = 'replace') => {
     try {
+      if (mode === 'replace') {
+        db.clearUnplayedTeams();
+      }
       const importPayload = teams.map((t: any) => ({
         team_name: t.team_name,
         captain_name: t.captain_name,
@@ -318,6 +514,7 @@ function registerIpcHandlers() {
       }));
 
       const result = db.importTeamsBatch(importPayload);
+      autoSyncExcel();
       return { success: true, data: result };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -386,19 +583,45 @@ function registerIpcHandlers() {
     }
   });
 
-  ipcMain.handle('discord:sendSelectionDM', async (_, { selectionId, captainDiscordId, captainName, teamName, teamId, force }) => {
+  ipcMain.handle('discord:sendSelectionDM', async (_, { selectionId, captainDiscordId, captainName, teamName, teamId, force, customTemplate }) => {
     try {
-      const res = await discordService.sendSelectionDM(selectionId, captainDiscordId, captainName, teamName, teamId, force);
+      const res = await discordService.sendSelectionDM(selectionId, captainDiscordId, captainName, teamName, teamId, force, customTemplate);
       return res;
     } catch (err: any) {
       return { success: false, error: err.message };
     }
   });
 
-  ipcMain.handle('discord:sendRoomDM', async (_, { captainDiscordId, captainName, teamName, teamId, roomId, roomPassword, matchTime, instructions }) => {
+  ipcMain.handle('discord:sendRoomDM', async (_, { captainDiscordId, captainName, teamName, teamId, roomId, roomPassword, matchTime, instructions, customTemplate }) => {
     try {
-      const res = await discordService.sendRoomDM(captainDiscordId, captainName, teamName, teamId, roomId, roomPassword, matchTime, instructions);
+      const res = await discordService.sendRoomDM(captainDiscordId, captainName, teamName, teamId, roomId, roomPassword, matchTime, instructions, customTemplate);
+      if (res && res.success && teamId) {
+        try {
+          db.updateTeamStatus(teamId, 'playing', 'Room ID and password sent');
+        } catch (e) {
+          console.error('Failed to update team status to playing:', e);
+        }
+      }
       return res;
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('discord:sendDirectMessage', async (_, { captainDiscordId, messageContent, teamId, captainName, teamName }) => {
+    try {
+      const res = await discordService.sendDirectMessage(captainDiscordId, messageContent, teamId, captainName, teamName);
+      return res;
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('db:clearAllTeams', async () => {
+    try {
+      db.clearAllTeams();
+      autoSyncExcel();
+      return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
     }

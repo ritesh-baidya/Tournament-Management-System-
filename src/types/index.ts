@@ -1,4 +1,8 @@
-export type TeamStatus = 'eligible' | 'selected' | 'played' | 'withdrawn' | 'disqualified';
+export type TeamStatus = 'eligible' | 'selected' | 'playing' | 'played' | 'withdrawn' | 'disqualified';
+
+export type TournamentStage = 'qualifying' | 'quarter_final' | 'semi_final' | 'final';
+
+export type QualificationStatus = 'pending' | 'qualified' | 'eliminated';
 
 export interface Player {
   id: string;
@@ -16,11 +20,15 @@ export interface Team {
   captain_phone?: string | null;
   captain_discord_id?: string | null;
   status: TeamStatus;
+  current_stage?: TournamentStage;
+  qualification_status?: QualificationStatus;
   original_data_json?: string;
   created_at: string;
   updated_at: string;
   players?: Player[];
   extra_columns?: Record<string, string>;
+  matches_played_count?: number;
+  last_match_result?: string;
 }
 
 export interface DrawSelection {
@@ -43,6 +51,7 @@ export interface Draw {
   tournament_id: string;
   draw_number: number;
   target_count: number;
+  stage?: TournamentStage;
   status: 'in_progress' | 'finalized' | 'cancelled';
   created_at: string;
   finalized_at?: string | null;
@@ -53,6 +62,7 @@ export interface Match {
   id: string;
   draw_id?: string | null;
   match_number: number;
+  stage?: TournamentStage;
   room_id: string;
   room_password: string;
   match_date: string;
@@ -74,6 +84,10 @@ export interface MatchTeamParticipation {
   captain_name?: string;
   selection_order?: number;
   actually_played: boolean;
+  match_number?: number;
+  stage?: TournamentStage | string;
+  result?: string;
+  match_date?: string;
   notes?: string;
   players?: MatchPlayerParticipation[];
 }
@@ -97,7 +111,7 @@ export interface AuditLog {
 
 export interface NotificationLog {
   id: string;
-  type: 'selection_dm' | 'room_dm';
+  type: 'selection_dm' | 'room_dm' | 'selection_congratulations' | 'room_password' | 'custom_dm';
   team_id: string;
   team_name: string;
   captain_name: string;
@@ -120,6 +134,10 @@ export interface DashboardStats {
   notifications_failed: number;
   latest_draw?: Draw | null;
   latest_match?: Match | null;
+  stage_counts?: Record<TournamentStage, number>;
+  qualified_count?: number;
+  eliminated_count?: number;
+  pending_count?: number;
 }
 
 export interface TournamentSettings {

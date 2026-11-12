@@ -1,12 +1,32 @@
-import React, { useEffect, useState } from 'react';
-import { 
-  Users, CheckCircle2, ShieldAlert, Award, Send, AlertCircle, 
-  Clock, Disc, FileSpreadsheet, Download, Trophy, Flame, 
-  ArrowRight, RefreshCw, Crosshair, ChevronRight
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  Users, CheckCircle2, Dices, Trophy, Send,
+  Upload, RefreshCw, ArrowRight,
+  Check, Copy, Gamepad2, Eye, EyeOff, Play
 } from 'lucide-react';
-import { DashboardStats, Draw, Match, AuditLog } from '../types';
+import * as XLSX from 'xlsx';
+import { DashboardStats, Match } from '../types';
 import { PageId } from '../components/Sidebar';
-import { formatDate } from '../utils/helpers';
+import { formatLocalDate, formatLocalTime } from '../utils/helpers';
+
+const HEADER_MAP: Record<string, string[]> = {
+  team_name: [
+    'team name', 'team', 'team_name', 'squad name', 'squad', 'teamname', 'squad_name', 'teams', 'team_title'
+  ],
+  captain_name: [
+    'captain name', 'captain', 'leader', 'captain_name', 'leader name', 'leader_name', 'igl', 'player 1', 'player1', 'name'
+  ],
+  captain_phone: [
+    'captain phone number', 'captain phone', 'phone number', 'phone', 'mobile number', 
+    'mobile', 'contact', 'whatsapp', 'captain mobile', 'captain_phone'
+  ],
+  captain_discord_id: [
+    'captain discord user id', 'captain discord id', 'discord user id', 'discord id', 
+    'discord uid', 'captain discord', 'discord_id', 'discord_user_id', 'discord',
+    'discord username', 'captain discord username', 'discord tag', 'discord handle',
+    'discord name', 'discord_username', 'username', 'captain discord name', 'discord user'
+  ]
+};
 
 interface DashboardProps {
   onNavigate: (page: PageId) => void;
@@ -15,376 +35,480 @@ interface DashboardProps {
 
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onRefreshGlobalStats }) => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [recentLogs, setRecentLogs] = useState<AuditLog[]>([]);
+  const [discordStatus, setDiscordStatus] = useState<{ isReady: boolean; botTag?: string }>({ isReady: false });
+  const [currentMatch, setCurrentMatch] = useState<Match | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isImporting, setIsImporting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState<{ count: number; name: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const loadData = async () => {
-    setLoading(true);
+  const copyToClipboard = (text: string, key: string) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const loadData = async (isBackground = false) => {
+    if (!isBackground) setLoading(true);
     try {
       const api = (window as any).electronAPI;
       if (!api) return;
 
-      const [statsRes, logsRes] = await Promise.all([
-        api.getDashboardStats(),
-        api.getAuditLogs()
+      const [statsRes, discordRes, matchRes] = await Promise.all([
+        api.getDashboardStats ? api.getDashboardStats() : Promise.resolve({ success: false }),
+        api.getDiscordStatus ? api.getDiscordStatus() : Promise.resolve({ success: false }),
+        api.getLatestMatch ? api.getLatestMatch() : Promise.resolve({ success: false })
       ]);
 
-      if (statsRes.success) setStats(statsRes.data);
-      if (logsRes.success) setRecentLogs((logsRes.data || []).slice(0, 6));
+      if (statsRes?.success && statsRes.data) {
+        setStats(statsRes.data);
+        if (statsRes.data.latest_match) {
+          setCurrentMatch(statsRes.data.latest_match);
+        }
+      }
+
+      if (discordRes?.success) {
+        setDiscordStatus(discordRes.data || { isReady: false });
+      }
+
+      if (matchRes?.success && matchRes.data) {
+        setCurrentMatch(matchRes.data);
+      }
     } catch (err) {
       console.error('Error loading dashboard data:', err);
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadData();
+    const interval = setInterval(() => loadData(true), 15000);
+    const handleUpdate = () => loadData(true);
+    window.addEventListener('teams-updated', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('teams-updated', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
+    };
   }, []);
 
-  const statCards = [
-    {
-      title: 'Total Registered Teams',
-      value: stats?.total_teams ?? 0,
-      icon: Users,
-      color: 'from-blue-600/20 to-indigo-600/10 text-blue-400 border-blue-500/20',
-      action: () => onNavigate('all-teams')
-    },
-    {
-      title: 'Eligible for Next Draw',
-      value: stats?.eligible_teams ?? 0,
-      icon: CheckCircle2,
-      color: 'from-emerald-600/20 to-teal-600/10 text-emerald-400 border-emerald-500/20',
-      highlight: true,
-      action: () => onNavigate('spin-wheel')
-    },
-    {
-      title: 'Played Teams (Ineligible)',
-      value: stats?.played_teams ?? 0,
-      icon: Trophy,
-      color: 'from-purple-600/20 to-pink-600/10 text-purple-400 border-purple-500/20',
-      action: () => onNavigate('all-teams')
-    },
-    {
-      title: 'Currently Selected',
-      value: stats?.selected_teams ?? 0,
-      icon: Award,
-      color: 'from-amber-600/20 to-yellow-600/10 text-amber-400 border-amber-500/20',
-      action: () => onNavigate('selected-teams')
-    },
-    {
-      title: 'Discord Sent DMs',
-      value: stats?.notifications_sent ?? 0,
-      icon: Send,
-      color: 'from-teal-600/20 to-emerald-600/10 text-teal-400 border-teal-500/20',
-      action: () => onNavigate('discord-notifications')
-    },
-    {
-      title: 'Pending Notifications',
-      value: stats?.notifications_pending ?? 0,
-      icon: Clock,
-      color: 'from-yellow-600/20 to-amber-600/10 text-yellow-400 border-yellow-500/20',
-      action: () => onNavigate('discord-notifications')
-    },
-    {
-      title: 'Failed DM Deliveries',
-      value: stats?.notifications_failed ?? 0,
-      icon: AlertCircle,
-      color: 'from-rose-600/20 to-red-600/10 text-rose-400 border-rose-500/20',
-      action: () => onNavigate('discord-notifications')
-    },
-    {
-      title: 'Pool Remaining',
-      value: stats?.remaining_eligible ?? 0,
-      icon: Disc,
-      color: 'from-cyan-600/20 to-blue-600/10 text-cyan-400 border-cyan-500/20',
-      action: () => onNavigate('spin-wheel')
+  const handleImportExcel = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsImporting(true);
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(new Uint8Array(data), { type: 'array' });
+      const sheetName = workbook.SheetNames[0];
+      if (!sheetName) throw new Error('No sheets found in workbook.');
+
+      const worksheet = workbook.Sheets[sheetName];
+      const rawData = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { header: 1 });
+      if (!rawData || rawData.length === 0) throw new Error('Excel file is empty.');
+
+      // Find header row in first 5 rows
+      let headerRowIndex = 0;
+      let colToField: Record<number, string> = {};
+
+      for (let r = 0; r < Math.min(rawData.length, 5); r++) {
+        const candidateHeaders = (rawData[r] as any[] || []).map(h => String(h || '').trim());
+        const candidateMap: Record<number, string> = {};
+        candidateHeaders.forEach((h, idx) => {
+          if (!h) return;
+          const norm = h.toLowerCase().trim().replace(/[\-_/\\()]/g, ' ').replace(/\s+/g, ' ');
+          for (const [field, aliases] of Object.entries(HEADER_MAP)) {
+            if (aliases.includes(norm)) {
+              candidateMap[idx] = field;
+              break;
+            }
+          }
+          if (!candidateMap[idx]) {
+            if (norm.includes('discord')) candidateMap[idx] = 'captain_discord_id';
+            else if (norm.includes('team') || norm.includes('squad')) candidateMap[idx] = 'team_name';
+            else if (norm.includes('captain') || norm.includes('leader') || norm.includes('igl')) {
+              if (norm.includes('phone') || norm.includes('mobile') || norm.includes('whatsapp') || norm.includes('contact')) candidateMap[idx] = 'captain_phone';
+              else candidateMap[idx] = 'captain_name';
+            }
+            else if (norm.includes('phone') || norm.includes('mobile') || norm.includes('whatsapp')) candidateMap[idx] = 'captain_phone';
+          }
+        });
+        if (Object.keys(candidateMap).length >= 1) {
+          headerRowIndex = r;
+          colToField = candidateMap;
+          break;
+        }
+      }
+
+      if (Object.keys(colToField).length === 0) {
+        colToField[0] = 'team_name';
+        colToField[1] = 'captain_name';
+        colToField[2] = 'captain_discord_id';
+        headerRowIndex = -1;
+      }
+
+      const rows: any[] = [];
+      const startRow = headerRowIndex + 1;
+      for (let r = startRow; r < rawData.length; r++) {
+        const rowArr = rawData[r] as any[];
+        if (!rowArr || rowArr.length === 0 || rowArr.every(c => c === undefined || c === null || String(c).trim() === '')) {
+          continue;
+        }
+
+        const rowObj: any = {
+          team_name: '',
+          captain_name: '',
+          captain_discord_id: '',
+          captain_phone: '',
+          extra_columns: {}
+        };
+
+        Object.entries(colToField).forEach(([idxStr, field]) => {
+          const idx = parseInt(idxStr, 10);
+          let val = '';
+          if (rowArr[idx] !== undefined && rowArr[idx] !== null) {
+            if (typeof rowArr[idx] === 'number' && rowArr[idx] > 1e16) {
+              val = BigInt(Math.round(rowArr[idx])).toString();
+            } else {
+              val = String(rowArr[idx]).trim();
+            }
+          }
+          rowObj[field] = val;
+        });
+
+        if (!rowObj.captain_discord_id) {
+          rowArr.forEach((cellVal) => {
+            let str = '';
+            if (typeof cellVal === 'number' && cellVal > 1e16) {
+              str = BigInt(Math.round(cellVal)).toString();
+            } else if (typeof cellVal === 'string') {
+              str = cellVal.trim();
+            }
+            if (/^\d{17,20}$/.test(str)) {
+              rowObj.captain_discord_id = str;
+            }
+          });
+        }
+
+        if (rowObj.team_name || rowObj.captain_name) {
+          rows.push(rowObj);
+        }
+      }
+
+      if (rows.length === 0) {
+        alert('No valid team rows found in the uploaded file.');
+        return;
+      }
+
+      const api = (window as any).electronAPI;
+      if (api?.commitExcelImport) {
+        const res = await api.commitExcelImport(rows, 'replace');
+        if (res?.success) {
+          const count = res.data?.inserted ?? rows.length;
+          setImportSuccess({ count, name: file.name });
+          onRefreshGlobalStats();
+          await loadData();
+          window.dispatchEvent(new Event('teams-updated'));
+          setTimeout(() => {
+            setImportSuccess(null);
+          }, 2000);
+        } else {
+          alert(`Import failed: ${res?.error || 'Unknown error'}`);
+        }
+      }
+    } catch (err: any) {
+      alert(`Import error: ${err.message}`);
+    } finally {
+      setIsImporting(false);
+      if (event.target) event.target.value = '';
     }
-  ];
+  };
+
+  const totalTeams = stats?.total_teams ?? 0;
+  const eligibleTeams = stats?.eligible_teams ?? 0;
+  const selectedTeams = stats?.selected_teams ?? 0;
+  const playedTeams = stats?.played_teams ?? 0;
+  const notifSent = stats?.notifications_sent ?? 0;
+  const notifFailed = stats?.notifications_failed ?? 0;
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto h-full">
-      {/* Top Banner */}
-      <div className="relative rounded-2xl p-6 overflow-hidden border border-emerald-500/20 bg-gradient-to-r from-[#0D1B1B] via-[#0D1525] to-[#140F22] shadow-xl">
-        <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-radial from-emerald-500/10 to-transparent pointer-events-none" />
-        
-        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                Tournament Command Hub
-              </span>
-              <span className="text-slate-400 text-xs">• 12 Teams Per Match</span>
+    <div className="p-6 md:p-8 space-y-6 max-w-6xl mx-auto overflow-y-auto h-full text-slate-100 relative">
+      {/* 2-Second Success Popup Notification */}
+      {importSuccess && (
+        <div className="fixed top-6 right-6 z-50 animate-in fade-in slide-in-from-top-4 duration-300">
+          <div className="bg-emerald-950/95 border border-emerald-500/60 text-white px-5 py-3.5 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center shrink-0 text-emerald-400">
+              <CheckCircle2 size={20} />
             </div>
-            <h1 className="text-2xl md:text-3xl font-extrabold text-white tracking-wide font-heading">
-              FREE FIRE TOURNAMENT SYSTEM
-            </h1>
-            <p className="text-sm text-slate-300 mt-1 max-w-2xl">
-              Import complete team rosters from Excel, conduct cryptographically fair random draws, 
-              automate Discord DMs, track player participation, and auto-update rotation workbooks.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => { loadData(); onRefreshGlobalStats(); }}
-              className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-white/5 transition-all cursor-pointer"
-              title="Refresh Stats"
-            >
-              <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-            </button>
-            <button
-              onClick={() => onNavigate('spin-wheel')}
-              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold text-sm flex items-center gap-2 shadow-lg shadow-emerald-950/60 transition-all cursor-pointer group"
-            >
-              <Disc size={18} className="group-hover:rotate-45 transition-transform" />
-              <span>Launch Spin Wheel</span>
-              <ArrowRight size={16} />
-            </button>
+            <div>
+              <h4 className="text-xs font-bold text-emerald-200">Teams Imported Successfully!</h4>
+              <p className="text-[11px] text-slate-300">
+                Loaded <span className="font-bold text-white font-mono">{importSuccess.count}</span> squads from{' '}
+                <span className="font-medium text-emerald-300">{importSuccess.name}</span>
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* 8 Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {statCards.map((card, idx) => {
-          const Icon = card.icon;
-          return (
-            <div
-              key={idx}
-              onClick={card.action}
-              className={`p-4 rounded-xl esports-card border bg-gradient-to-br ${card.color} transition-all duration-200 hover:-translate-y-0.5 cursor-pointer relative group`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-300 truncate max-w-[140px]">
-                  {card.title}
-                </span>
-                <Icon size={18} className="opacity-80 group-hover:scale-110 transition-transform" />
-              </div>
-              <div className="mt-3 flex items-baseline justify-between">
-                <span className="text-2xl md:text-3xl font-extrabold text-white font-mono tracking-tight">
-                  {card.value}
-                </span>
-                <ChevronRight size={14} className="text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileInputChange}
+        accept=".xlsx, .xls, .csv"
+        className="hidden"
+      />
 
-      {/* Quick Action Buttons Grid */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 font-heading">
-          Quick Actions
-        </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <button
-            onClick={() => onNavigate('import-excel')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-colors">
-              <FileSpreadsheet size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Import Excel</div>
-              <div className="text-[11px] text-slate-400">Add team rosters</div>
-            </div>
-          </button>
+      {/* Header */}
+      <div className="flex items-center justify-between pb-4 border-b border-slate-800/80">
+        <div>
+          <h1 className="text-xl font-bold text-slate-100">Dashboard</h1>
+          <p className="text-xs text-slate-400">Tournament overview & real-time status</p>
+        </div>
 
-          <button
-            onClick={() => onNavigate('spin-wheel')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-colors">
-              <Disc size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Open Spin Wheel</div>
-              <div className="text-[11px] text-slate-400">Pick 12 teams</div>
-            </div>
-          </button>
-
-          <button
-            onClick={() => onNavigate('selected-teams')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-colors">
-              <Award size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Selected Teams</div>
-              <div className="text-[11px] text-slate-400">View current draw</div>
-            </div>
-          </button>
-
+        <div className="flex items-center gap-3">
+          {/* Discord Bot Status Pill */}
           <button
             onClick={() => onNavigate('discord-notifications')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors text-xs cursor-pointer"
+            title="View Discord Integration"
           >
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-colors">
-              <Send size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Send Notifications</div>
-              <div className="text-[11px] text-slate-400">Discord DMs</div>
-            </div>
+            <span className={`w-2 h-2 rounded-full ${discordStatus.isReady ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+            <span className={discordStatus.isReady ? 'text-emerald-400 font-medium' : 'text-slate-400'}>
+              {discordStatus.isReady ? `Bot Online (${discordStatus.botTag || 'Active'})` : 'Bot Offline'}
+            </span>
           </button>
 
+          {/* Refresh Button */}
           <button
-            onClick={() => onNavigate('match-details')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
+            onClick={() => { loadData(); onRefreshGlobalStats(); }}
+            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 transition-colors"
+            title="Refresh Dashboard"
           >
-            <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 group-hover:bg-blue-500 group-hover:text-black transition-colors">
-              <Crosshair size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Match Details</div>
-              <div className="text-[11px] text-slate-400">Room ID & password</div>
-            </div>
-          </button>
-
-          <button
-            onClick={() => onNavigate('complete-match')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400 group-hover:bg-purple-500 group-hover:text-black transition-colors">
-              <Trophy size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Complete Match</div>
-              <div className="text-[11px] text-slate-400">Update participation</div>
-            </div>
-          </button>
-
-          <button
-            onClick={() => onNavigate('excel-export')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400 group-hover:bg-teal-500 group-hover:text-black transition-colors">
-              <Download size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Export Workbook</div>
-              <div className="text-[11px] text-slate-400">Download 5 sheets</div>
-            </div>
-          </button>
-
-          <button
-            onClick={() => onNavigate('team-rosters')}
-            className="p-3.5 rounded-xl esports-card border border-white/5 hover:border-emerald-500/30 flex items-center gap-3 text-left transition-all hover:bg-slate-800/40 cursor-pointer group"
-          >
-            <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 group-hover:bg-amber-500 group-hover:text-black transition-colors">
-              <Users size={18} />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Team Rosters</div>
-              <div className="text-[11px] text-slate-400">Full player squads</div>
-            </div>
+            <RefreshCw size={14} className={loading ? 'animate-spin text-indigo-400' : ''} />
           </button>
         </div>
       </div>
 
-      {/* Two Column Layout: Latest Draw & Recent Activity */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Latest Draw Panel */}
-        <div className="rounded-2xl esports-card border border-white/10 p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <Disc size={18} className="text-emerald-400" />
-                <h3 className="font-bold text-white tracking-wide">Latest Draw Status</h3>
-              </div>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                stats?.latest_draw?.status === 'in_progress' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400'
+      {/* 5 Essential Stats Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3.5">
+        {/* Total Teams */}
+        <div
+          onClick={() => onNavigate('all-teams')}
+          className="p-4 rounded-xl bg-[#121622] border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">Total Teams</span>
+            <Users size={15} className="text-blue-400" />
+          </div>
+          <div className="text-2xl font-bold font-mono text-white">{totalTeams}</div>
+        </div>
+
+        {/* Available Teams */}
+        <div
+          onClick={() => onNavigate('all-teams')}
+          className="p-4 rounded-xl bg-[#121622] border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">Available</span>
+            <CheckCircle2 size={15} className="text-emerald-400" />
+          </div>
+          <div className="text-2xl font-bold font-mono text-emerald-400">{eligibleTeams}</div>
+        </div>
+
+        {/* Selected Teams */}
+        <div
+          onClick={() => onNavigate('match-management')}
+          className="p-4 rounded-xl bg-[#121622] border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">In Match</span>
+            <Dices size={15} className="text-amber-400" />
+          </div>
+          <div className="text-2xl font-bold font-mono text-amber-400">{selectedTeams}</div>
+        </div>
+
+        {/* Played Teams */}
+        <div
+          onClick={() => onNavigate('match-history')}
+          className="p-4 rounded-xl bg-[#121622] border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">Played</span>
+            <Trophy size={15} className="text-purple-400" />
+          </div>
+          <div className="text-2xl font-bold font-mono text-purple-400">{playedTeams}</div>
+        </div>
+
+        {/* Discord Delivery */}
+        <div
+          onClick={() => onNavigate('discord-notifications')}
+          className="p-4 rounded-xl bg-[#121622] border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer group col-span-2 md:col-span-1"
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">DMs Sent</span>
+            <Send size={15} className="text-indigo-400" />
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono text-white">{notifSent}</span>
+            {notifFailed > 0 && (
+              <span className="text-[11px] font-semibold text-rose-400">({notifFailed} failed)</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Middle Section: Active Match Overview & Separate Import Teams Card */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Active Match Card (8 cols) */}
+        <div className="lg:col-span-8 bg-[#121622] border border-slate-800 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800/70 pb-3">
+            <span className="text-xs font-semibold text-slate-200 flex items-center gap-2">
+              <Gamepad2 size={16} className="text-indigo-400" />
+              Active Match
+            </span>
+            {currentMatch && (
+              <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                currentMatch.status === 'completed'
+                  ? 'bg-purple-950/40 text-purple-400 border border-purple-800/40'
+                  : 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/40'
               }`}>
-                {stats?.latest_draw ? `Draw #${stats.latest_draw.draw_number} (${stats.latest_draw.status})` : 'No Active Draw'}
+                {currentMatch.status}
               </span>
-            </div>
-
-            {stats?.latest_draw && stats.latest_draw.selections && stats.latest_draw.selections.length > 0 ? (
-              <div className="mt-4 space-y-2">
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>Progress: {stats.latest_draw.selections.length} / {stats.latest_draw.target_count} Selected</span>
-                  <span>{Math.round((stats.latest_draw.selections.length / stats.latest_draw.target_count) * 100)}%</span>
-                </div>
-                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                  <div 
-                    className="bg-emerald-500 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${Math.min((stats.latest_draw.selections.length / stats.latest_draw.target_count) * 100, 100)}%` }}
-                  />
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-                  {stats.latest_draw.selections.slice(0, 6).map((sel) => (
-                    <div key={sel.id} className="p-2 rounded-lg bg-slate-900/60 border border-white/5 flex items-center justify-between text-xs">
-                      <div className="truncate">
-                        <span className="font-mono text-emerald-400 font-bold mr-1.5">#{sel.selection_order}</span>
-                        <span className="font-semibold text-slate-200">{sel.team_name}</span>
-                      </div>
-                      <span className="text-[10px] text-slate-400 shrink-0 capitalize">{sel.notification_status}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="py-8 text-center text-slate-400 text-xs">
-                No draw currently in progress. Start a new draw to spin the wheel!
-              </div>
             )}
           </div>
 
-          <div className="mt-5 pt-3 border-t border-white/5 flex justify-end">
-            <button
-              onClick={() => onNavigate('selected-teams')}
-              className="text-xs font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer"
-            >
-              <span>View Full Selection List</span>
-              <ArrowRight size={14} />
-            </button>
-          </div>
+          {currentMatch ? (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between text-xs">
+                <div>
+                  <span className="text-slate-400">Match Number:</span>
+                  <span className="text-slate-200 font-bold font-mono ml-1.5">#{currentMatch.match_number}</span>
+                </div>
+                <div className="text-slate-400">
+                  Time: <span className="text-indigo-400 font-semibold">
+                    {currentMatch.match_time || (currentMatch.completed_at ? formatLocalTime(currentMatch.completed_at) : (currentMatch.created_at ? formatLocalTime(currentMatch.created_at) : 'Local Time'))}
+                  </span>
+                </div>
+              </div>
+
+              {/* Room ID and Masked Password Details */}
+              <div className="grid grid-cols-2 gap-3">
+                {/* Room ID */}
+                <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Room ID</span>
+                    <span className="text-sm font-mono font-bold text-white">
+                      {currentMatch.room_id || 'Not set'}
+                    </span>
+                  </div>
+                  {currentMatch.room_id && (
+                    <button
+                      onClick={() => copyToClipboard(currentMatch.room_id, 'room_id')}
+                      className="p-1 text-slate-400 hover:text-white transition-colors"
+                      title="Copy Room ID"
+                    >
+                      {copiedKey === 'room_id' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                    </button>
+                  )}
+                </div>
+
+                {/* Masked Password with Show/Hide toggle */}
+                <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Password</span>
+                    <span className="text-sm font-mono font-bold text-white tracking-wider">
+                      {currentMatch.room_password
+                        ? (showPassword ? currentMatch.room_password : '•'.repeat(currentMatch.room_password.length))
+                        : 'Not set'}
+                    </span>
+                  </div>
+                  {currentMatch.room_password && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="p-1 text-slate-400 hover:text-white transition-colors"
+                        title={showPassword ? 'Hide Password' : 'Show Password'}
+                      >
+                        {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                      <button
+                        onClick={() => copyToClipboard(currentMatch.room_password, 'room_pwd')}
+                        className="p-1 text-slate-400 hover:text-white transition-colors"
+                        title="Copy Password"
+                      >
+                        {copiedKey === 'room_pwd' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  onClick={() => onNavigate('match-management')}
+                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg flex items-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/20"
+                >
+                  <span>Open Match Management</span>
+                  <ArrowRight size={13} />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="py-6 text-center space-y-3">
+              <p className="text-xs text-slate-400">No active match scheduled currently.</p>
+              <button
+                onClick={() => onNavigate('random-spin-wheel')}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg inline-flex items-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/20"
+              >
+                <Play size={13} />
+                <span>Spin Wheel & Setup Match</span>
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* Recent Audit Activity Panel */}
-        <div className="rounded-2xl esports-card border border-white/10 p-5 flex flex-col justify-between">
+        {/* Dedicated Import Teams (Excel) Card (4 cols) */}
+        <div className="lg:col-span-4 bg-[#121622] border border-slate-800 rounded-xl p-5 flex flex-col justify-between space-y-3">
           <div>
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <Clock size={18} className="text-teal-400" />
-                <h3 className="font-bold text-white tracking-wide">Recent Tournament Audit Log</h3>
-              </div>
-              <span className="text-[11px] text-slate-400">Persistent SQLite Log</span>
+            <div className="border-b border-slate-800/70 pb-3 mb-3">
+              <span className="text-xs font-semibold text-slate-200 flex items-center gap-2">
+                <Upload size={15} className="text-blue-400" />
+                Import Teams
+              </span>
             </div>
-
-            <div className="mt-4 space-y-2.5 max-h-56 overflow-y-auto pr-1">
-              {recentLogs.length > 0 ? (
-                recentLogs.map((log) => (
-                  <div key={log.id} className="p-2.5 rounded-xl bg-slate-900/50 border border-white/5 text-xs flex items-start gap-3">
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-800 text-slate-300 uppercase shrink-0">
-                      {log.action}
-                    </span>
-                    <div className="flex-1 truncate">
-                      <p className="text-slate-200 truncate">{log.details}</p>
-                      <span className="text-[10px] text-slate-500">{formatDate(log.timestamp)}</span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="py-8 text-center text-slate-400 text-xs">
-                  No tournament logs recorded yet.
-                </div>
-              )}
-            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Upload your squad roster Excel (<code className="text-slate-300 font-mono text-[11px]">.xlsx</code>) or CSV file. Teams and players will be imported and ready for selection.
+            </p>
           </div>
 
-          <div className="mt-5 pt-3 border-t border-white/5 flex justify-end">
-            <button
-              onClick={() => onNavigate('draw-history')}
-              className="text-xs font-bold text-teal-400 hover:text-teal-300 flex items-center gap-1 cursor-pointer"
-            >
-              <span>View Tournament History</span>
-              <ArrowRight size={14} />
-            </button>
-          </div>
+          <button
+            onClick={handleImportExcel}
+            disabled={isImporting}
+            className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-2 transition-colors shadow-sm shadow-blue-600/20 cursor-pointer"
+          >
+            {isImporting ? (
+              <>
+                <RefreshCw size={14} className="animate-spin" />
+                <span>Importing Teams...</span>
+              </>
+            ) : (
+              <>
+                <Upload size={14} />
+                <span>Import Teams (Excel)</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
     </div>

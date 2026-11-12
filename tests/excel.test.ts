@@ -71,7 +71,7 @@ describe('Excel Import, Validation & Export Service', () => {
     expect(preview.rows[0].substitute_name).toBe('Dev');
   });
 
-  it('should detect missing required columns and flag invalid rows', () => {
+  it('should auto-heal missing team/captain names instead of rejecting rows', () => {
     const rawData = [
       {
         'Team Name': '', // Missing
@@ -89,10 +89,15 @@ describe('Excel Import, Validation & Export Service', () => {
     const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
 
     const preview = ExcelService.parseExcelBuffer(buffer);
-    expect(preview.validRows).toBe(0);
-    expect(preview.invalidRows).toBe(2);
-    expect(preview.rows[0].validationErrors).toContain('Missing Team Name');
-    expect(preview.rows[1].validationErrors).toContain('Missing Captain Name');
+    // All rows should be valid thanks to auto-healing
+    expect(preview.validRows).toBe(2);
+    expect(preview.invalidRows).toBe(0);
+    // Row 1: captain exists, team auto-generated as "Captain's Squad"
+    expect(preview.rows[0].team_name).toBe("Incomplete Captain's Squad");
+    expect(preview.rows[0].captain_name).toBe('Incomplete Captain');
+    // Row 2: team exists, captain auto-generated as "Team Leader"
+    expect(preview.rows[1].team_name).toBe('Nameless Squad');
+    expect(preview.rows[1].captain_name).toBe('Nameless Squad Leader');
   });
 
   it('should detect duplicate teams in file', () => {

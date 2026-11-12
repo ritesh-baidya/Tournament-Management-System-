@@ -1,11 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { 
   MessageSquare, Send, CheckCircle2, AlertCircle, RefreshCw, 
-  HelpCircle, Shield, Key, ExternalLink, RotateCcw, AlertTriangle, Check 
+  Key, Eye, EyeOff, Check, Radio
 } from 'lucide-react';
-import { Draw, DrawSelection, NotificationLog } from '../types';
-import { ConfirmationModal } from '../components/ConfirmationModal';
-import { formatDate } from '../utils/helpers';
+import { Team, NotificationLog } from '../types';
 import { PageId } from '../components/Sidebar';
 
 interface DiscordNotificationsProps {
@@ -14,16 +12,41 @@ interface DiscordNotificationsProps {
 }
 
 export const DiscordNotifications: React.FC<DiscordNotificationsProps> = ({ 
-  onNavigate, 
   onRefreshGlobalStats 
 }) => {
-  const [activeDraw, setActiveDraw] = useState<Draw | null>(null);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [logs, setLogs] = useState<NotificationLog[]>([]);
   const [botStatus, setBotStatus] = useState<{ isReady: boolean; botTag?: string; botId?: string }>({ isReady: false });
+  const [botToken, setBotToken] = useState<string>('');
+  const [showToken, setShowToken] = useState(false);
+  const [testingBot, setTestingBot] = useState(false);
+  const [savingToken, setSavingToken] = useState(false);
+  const [tokenFeedback, setTokenFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Message states
+  const [targetRecipient, setTargetRecipient] = useState<string>('');
+  const [messageContent, setMessageContent] = useState<string>(
+    "🎉 Congratulations {captain_name}!\n\nYour team, {team_name}, has been selected for today's tournament match.\n\nPlease stay ready and keep an eye on your Discord messages for room details.\n\nGood luck! 🔥"
+  );
   const [isSending, setIsSending] = useState(false);
-  const [showTutorialModal, setShowTutorialModal] = useState(false);
-  const [isApprovalModalOpen, setIsApprovalModalOpen] = useState(false);
+  const [resultAlert, setResultAlert] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+
+  const handleApplyTemplate = (type: 'selection' | 'room' | 'reminder') => {
+    if (type === 'selection') {
+      setMessageContent(
+        "🎉 Congratulations {captain_name}!\n\nYour team, {team_name}, has been selected for today's tournament match.\n\nPlease stay ready and keep an eye on your Discord messages for room details.\n\nGood luck! 🔥"
+      );
+    } else if (type === 'room') {
+      setMessageContent(
+        "🔥 Match Room Details\n\nHello {captain_name} ({team_name})!\n\nRoom ID: 1234567\nPassword: 888\n\nPlease enter the room on time with your registered squad. Good luck! 🎮"
+      );
+    } else if (type === 'reminder') {
+      setMessageContent(
+        "⏰ Tournament Reminder\n\nHello {captain_name}!\n\nThis is a quick reminder that your team {team_name} is scheduled to play shortly. Please join Discord voice and ensure all squad members are online!"
+      );
+    }
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -31,30 +54,37 @@ export const DiscordNotifications: React.FC<DiscordNotificationsProps> = ({
       const api = (window as any).electronAPI;
       if (!api) return;
 
-      const [drawRes, statusRes, logsRes] = await Promise.all([
-        api.getActiveDraw(),
+      const [statusRes, teamsRes, logsRes, settingsRes] = await Promise.all([
         api.getDiscordStatus(),
-        api.getNotificationLogs()
+        api.getAllTeams(),
+        api.getNotificationLogs(),
+        api.getSettings?.()
       ]);
 
-      if (drawRes.success && drawRes.data) {
-        setActiveDraw(drawRes.data);
-      } else {
-        const histRes = await api.getDrawHistory();
-        if (histRes.success && histRes.data && histRes.data.length > 0) {
-          setActiveDraw(histRes.data[0]);
-        }
-      }
-
-      if (statusRes.success && statusRes.data) {
+      if (statusRes?.success && statusRes.data) {
         setBotStatus(statusRes.data);
       }
 
-      if (logsRes.success) {
-        setLogs(logsRes.data || []);
+      if (teamsRes?.success && teamsRes.data) {
+        setTeams(teamsRes.data);
+        if (teamsRes.data.length > 0) {
+          setTargetRecipient((prev) => {
+            if (prev) return prev;
+            const withDiscord = teamsRes.data.find((t: Team) => t.captain_discord_id && t.captain_discord_id.trim());
+            return withDiscord ? withDiscord.id : teamsRes.data[0].id;
+          });
+        }
+      }
+
+      if (logsRes?.success && logsRes.data) {
+        setLogs(logsRes.data);
+      }
+
+      if (settingsRes?.success && settingsRes.data?.discord_bot_token) {
+        setBotToken(settingsRes.data.discord_bot_token);
       }
     } catch (err) {
-      console.error('Failed to load discord data:', err);
+      console.error('Failed to load Discord data:', err);
     } finally {
       setLoading(false);
     }
@@ -64,338 +94,370 @@ export const DiscordNotifications: React.FC<DiscordNotificationsProps> = ({
     loadData();
   }, []);
 
-  const selections: DrawSelection[] = activeDraw?.selections || [];
+  // Save Token
+  const handleSaveToken = async () => {
+    if (!botToken.trim()) {
+      setTokenFeedback({ type: 'error', message: 'Token cannot be empty' });
+      return;
+    }
+    setSavingToken(true);
+    setTokenFeedback(null);
+    try {
+      const api = (window as any).electronAPI;
+      if (!api) return;
+      const settRes = await api.getSettings?.();
+      const current = settRes?.data || {};
+      const res = await api.saveSettings({ ...current, discord_bot_token: botToken.trim() });
+      if (res?.success) {
+        setTokenFeedback({ type: 'success', message: 'Token saved' });
+        setTimeout(() => setTokenFeedback(null), 3000);
+        onRefreshGlobalStats();
+      } else {
+        setTokenFeedback({ type: 'error', message: res?.error || 'Failed to save token' });
+      }
+    } catch (err: any) {
+      setTokenFeedback({ type: 'error', message: err.message || 'Error saving' });
+    } finally {
+      setSavingToken(false);
+    }
+  };
 
-  // Send DM to an individual captain
-  const handleSendIndividual = async (sel: DrawSelection, force: boolean = false) => {
-    if (!sel.captain_discord_id) {
-      alert(`Cannot send Discord DM to "${sel.team_name}": Missing Captain Discord User ID.`);
+  // Test Bot Connection
+  const handleTestConnection = async () => {
+    if (!botToken.trim()) {
+      setTokenFeedback({ type: 'error', message: 'Enter a bot token first' });
+      return;
+    }
+    setTestingBot(true);
+    setTokenFeedback(null);
+    try {
+      const api = (window as any).electronAPI;
+      if (!api) return;
+      const res = await api.testDiscordConnection(botToken.trim());
+      if (res?.success) {
+        setBotStatus({ isReady: true, botTag: res.botTag, botId: res.botId });
+        setTokenFeedback({ type: 'success', message: `Connected as ${res.botTag || 'Bot'}` });
+        onRefreshGlobalStats();
+      } else {
+        setTokenFeedback({ type: 'error', message: res?.error || 'Authentication failed' });
+      }
+    } catch (err: any) {
+      setTokenFeedback({ type: 'error', message: err.message || 'Connection error' });
+    } finally {
+      setTestingBot(false);
+    }
+  };
+
+  // Send Direct Message to selected Captain
+  const handleSendMessage = async () => {
+    if (!messageContent.trim()) {
+      setResultAlert({ type: 'error', message: 'Message content cannot be empty.' });
       return;
     }
 
+    const targetTeam = teams.find(t => t.id === targetRecipient);
+    if (!targetTeam) {
+      setResultAlert({ type: 'error', message: 'Please select a team captain.' });
+      return;
+    }
+
+    if (!targetTeam.captain_discord_id || !targetTeam.captain_discord_id.trim()) {
+      setResultAlert({ 
+        type: 'error', 
+        message: `Team "${targetTeam.team_name}" does not have a Discord User ID configured.` 
+      });
+      return;
+    }
+
+    const api = (window as any).electronAPI;
+    if (!api) return;
+
+    setIsSending(true);
+    setResultAlert(null);
+
     try {
-      const api = (window as any).electronAPI;
-      const res = await api.sendSelectionDM(
-        sel.id,
-        sel.captain_discord_id,
-        sel.captain_name,
-        sel.team_name,
-        sel.team_id,
-        force
+      const compiledMessage = messageContent
+        .replace(/{captain_name}/gi, targetTeam.captain_name)
+        .replace(/{team_name}/gi, targetTeam.team_name);
+
+      const res = await api.sendDirectMessage(
+        targetTeam.captain_discord_id,
+        compiledMessage,
+        targetTeam.id,
+        targetTeam.captain_name,
+        targetTeam.team_name
       );
 
-      if (!res.success) {
-        alert(`Failed to send DM to ${sel.captain_name}: ${res.error}`);
+      if (res?.success) {
+        if (targetTeam?.id && (compiledMessage.toLowerCase().includes('room') || compiledMessage.toLowerCase().includes('pass'))) {
+          if (api.updateTeamStatus) {
+            await api.updateTeamStatus(targetTeam.id, 'playing', 'Room credentials DM sent');
+          }
+          window.dispatchEvent(new Event('teams-updated'));
+        }
+        setResultAlert({ 
+          type: 'success', 
+          message: `DM delivered to ${targetTeam.captain_name} (${targetTeam.team_name})` 
+        });
+      } else {
+        setResultAlert({ 
+          type: 'error', 
+          message: `Failed to deliver DM: ${res?.error || 'Unknown error'}` 
+        });
       }
+
       await loadData();
       onRefreshGlobalStats();
     } catch (err: any) {
-      alert(`Error sending DM: ${err.message}`);
+      setResultAlert({ type: 'error', message: err.message || 'Error sending message' });
+    } finally {
+      setIsSending(false);
     }
   };
 
-  // Send batch approval
-  const handleSendBatchApproved = async () => {
-    setIsApprovalModalOpen(false);
-    setIsSending(true);
 
-    const api = (window as any).electronAPI;
-    let sentCount = 0;
-    let failCount = 0;
+  const sentCount = logs.filter(l => l.status === 'sent').length;
+  const failCount = logs.filter(l => l.status === 'failed').length;
+  const teamsWithDiscordCount = teams.filter(t => t.captain_discord_id && t.captain_discord_id.trim()).length;
 
-    for (const sel of selections) {
-      if (sel.notification_status === 'sent') continue; // Idempotent: don't re-send already delivered
-      if (!sel.captain_discord_id) {
-        failCount++;
-        continue;
-      }
-
-      const res = await api.sendSelectionDM(
-        sel.id,
-        sel.captain_discord_id,
-        sel.captain_name,
-        sel.team_name,
-        sel.team_id,
-        false
-      );
-
-      if (res.success) sentCount++;
-      else failCount++;
-    }
-
-    setIsSending(false);
-    await loadData();
-    onRefreshGlobalStats();
-    alert(`Notification Broadcast Complete!\n\nDelivered: ${sentCount}\nFailed: ${failCount}`);
-  };
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full bg-[#090C14]">
+        <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin" />
+      </div>
+    );
+  }
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto h-full">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/10">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-              Legitimate Discord Bot DM System
-            </span>
-            <span className="text-slate-400 text-xs">Direct Captain Outreach</span>
+    <div className="flex flex-col h-full bg-[#090C14] text-slate-100 overflow-y-auto p-6 md:p-8 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between pb-4 border-b border-slate-800/80">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl">
+            <MessageSquare className="w-5 h-5 text-indigo-400" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white tracking-wide font-heading flex items-center gap-2">
-            <MessageSquare className="text-emerald-400" size={26} />
-            DISCORD SELECTION NOTIFICATIONS
-          </h1>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowTutorialModal(true)}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center gap-2 cursor-pointer transition-colors"
-          >
-            <HelpCircle size={15} />
-            Bot Setup Guide
-          </button>
-
-          <button
-            onClick={() => setIsApprovalModalOpen(true)}
-            disabled={selections.length === 0 || isSending}
-            className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 disabled:opacity-50 flex items-center gap-2 cursor-pointer transition-all shadow-lg shadow-emerald-950/40"
-          >
-            <Send size={15} className={isSending ? 'animate-pulse' : ''} />
-            <span>{isSending ? 'Sending Notifications...' : 'Approve & Send All Selection DMs'}</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Bot Connection Banner */}
-      <div className="p-4 rounded-xl esports-card border border-white/10 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className={`w-3 h-3 rounded-full ${botStatus.isReady ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
           <div>
-            <div className="text-xs font-bold text-white">
-              {botStatus.isReady ? `Discord Bot Online: ${botStatus.botTag}` : 'Discord Bot Standby'}
-            </div>
-            <div className="text-[11px] text-slate-400">
-              {botStatus.isReady 
-                ? 'Ready to transmit selection direct messages to captain Discord IDs.' 
-                : 'Configure or test your Discord Bot token in Settings to enable direct messaging.'}
-            </div>
+            <h1 className="text-xl font-bold text-slate-100">Discord Integration</h1>
+            <p className="text-xs text-slate-400">Bot status and direct messaging</p>
           </div>
         </div>
 
-        <button
-          onClick={() => onNavigate('settings')}
-          className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
-        >
-          Configure Bot Token in Settings
-        </button>
+        {/* Status Badge */}
+        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${
+          botStatus.isReady 
+            ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/50' 
+            : 'bg-rose-950/40 text-rose-400 border-rose-800/50'
+        }`}>
+          <span className={`w-2 h-2 rounded-full ${botStatus.isReady ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+          <span>{botStatus.isReady ? `Bot Online (${botStatus.botTag || 'Active'})` : 'Bot Offline'}</span>
+        </div>
       </div>
 
-      {/* Selected Captains Notification Roster */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300 font-heading">
-            Captains Selected in Current Draw ({selections.length})
-          </h2>
-          <span className="text-xs text-slate-400">
-            Messages are sent individually via official Discord DMs
-          </span>
+      {/* Top Grid: Bot Connection + Delivery Stats */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* Bot Token Configuration */}
+        <div className="lg:col-span-2 bg-[#121622] border border-slate-800 rounded-xl p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+              <Key className="w-4 h-4 text-indigo-400" />
+              Bot Token Configuration
+            </span>
+            {tokenFeedback && (
+              <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                tokenFeedback.type === 'success' 
+                  ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-800/40' 
+                  : 'bg-rose-950/50 text-rose-400 border border-rose-800/40'
+              }`}>
+                {tokenFeedback.message}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <input
+                type="text"
+                value={botToken}
+                onChange={(e) => setBotToken(e.target.value)}
+                autoComplete="off"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-form-type="other"
+                style={{ WebkitTextSecurity: showToken ? 'none' : 'disc' } as any}
+                placeholder="Enter Discord Bot Token..."
+                className="w-full pl-3.5 pr-10 py-2 bg-slate-900 border border-slate-700/70 rounded-lg text-slate-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => setShowToken(!showToken)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors"
+                title={showToken ? 'Mask Token' : 'Show Token'}
+              >
+                {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleTestConnection}
+              disabled={testingBot || !botToken.trim()}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700/60 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              {testingBot ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Radio className="w-3.5 h-3.5 text-indigo-400" />}
+              <span>Test</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSaveToken}
+              disabled={savingToken || !botToken.trim()}
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shadow-sm shadow-indigo-600/30"
+            >
+              {savingToken ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              <span>Save</span>
+            </button>
+          </div>
         </div>
 
-        <div className="rounded-xl esports-card border border-white/10 overflow-hidden shadow-2xl">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead className="bg-[#090D17] text-slate-400 uppercase tracking-wider font-heading border-b border-white/10">
-                <tr>
-                  <th className="py-3 px-4">#</th>
-                  <th className="py-3 px-4">Team</th>
-                  <th className="py-3 px-4">Captain</th>
-                  <th className="py-3 px-4">Discord User ID</th>
-                  <th className="py-3 px-4">Delivery Status</th>
-                  <th className="py-3 px-4">Message ID</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {selections.map((sel) => (
-                  <tr key={sel.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="py-3 px-4 font-mono font-bold text-emerald-400">
-                      #{sel.selection_order}
-                    </td>
-                    <td className="py-3 px-4 font-bold text-white text-sm">
-                      {sel.team_name}
-                    </td>
-                    <td className="py-3 px-4 text-slate-200">
-                      {sel.captain_name}
-                    </td>
-                    <td className="py-3 px-4 font-mono text-slate-400">
-                      {sel.captain_discord_id || <span className="text-amber-400 italic">Missing ID</span>}
-                    </td>
-                    <td className="py-3 px-4">
-                      {sel.notification_status === 'sent' ? (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase">
-                          <CheckCircle2 size={11} /> Delivered
-                        </span>
-                      ) : sel.notification_status === 'failed' ? (
-                        <span 
-                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20 uppercase cursor-help"
-                          title={sel.notification_error || 'Delivery failed'}
-                        >
-                          <AlertCircle size={11} /> Failed
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase">
-                          Pending Approval
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 font-mono text-slate-500 text-[11px]">
-                      {sel.discord_message_id || '—'}
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      {sel.notification_status === 'failed' ? (
-                        <button
-                          onClick={() => handleSendIndividual(sel, true)}
-                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/30 transition-colors cursor-pointer"
-                        >
-                          Retry DM
-                        </button>
-                      ) : sel.notification_status === 'pending' ? (
-                        <button
-                          onClick={() => handleSendIndividual(sel, false)}
-                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30 transition-colors cursor-pointer"
-                        >
-                          Send DM
-                        </button>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">Delivered</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-
-                {selections.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="py-12 text-center text-slate-400 text-xs">
-                      No teams selected yet. Complete a draw on the Random Spin Wheel first.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+        {/* Quick Stats */}
+        <div className="bg-[#121622] border border-slate-800 rounded-xl p-5 flex items-center justify-around">
+          <div className="text-center">
+            <span className="text-[11px] text-slate-400 uppercase tracking-wider block font-medium">Total DMs</span>
+            <span className="text-xl font-bold text-slate-100">{logs.length}</span>
+          </div>
+          <div className="h-8 w-px bg-slate-800" />
+          <div className="text-center">
+            <span className="text-[11px] text-emerald-400 uppercase tracking-wider block font-medium">Delivered</span>
+            <span className="text-xl font-bold text-emerald-400">{sentCount}</span>
+          </div>
+          <div className="h-8 w-px bg-slate-800" />
+          <div className="text-center">
+            <span className="text-[11px] text-rose-400 uppercase tracking-wider block font-medium">Failed</span>
+            <span className="text-xl font-bold text-rose-400">{failCount}</span>
           </div>
         </div>
       </div>
 
-      {/* Manual Notification Fallback Card */}
-      <div className="p-4 rounded-xl bg-slate-900/60 border border-white/5 space-y-2">
-        <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider">
-          <AlertTriangle size={15} />
-          <span>Manual Notification Fallback & Privacy Guidelines</span>
+      {/* Send Message Card */}
+      <div className="bg-[#121622] border border-slate-800 rounded-xl p-6 space-y-4">
+        {/* Header: Title + Select Captain */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-2">
+            <Send className="w-4 h-4 text-indigo-400" />
+            <span className="text-sm font-semibold text-slate-100">Send Direct Message</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-400 whitespace-nowrap">Captain:</label>
+            <select
+              value={targetRecipient}
+              onChange={(e) => setTargetRecipient(e.target.value)}
+              className="px-3 py-1.5 bg-slate-900 border border-slate-700/70 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors max-w-xs"
+            >
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.team_name} — {t.captain_name} {t.captain_discord_id ? '' : '(No Discord ID)'}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-        <p className="text-xs text-slate-300 leading-relaxed">
-          Discord bots can only send DMs to users who share a server with the bot and have direct messages enabled in their server privacy settings. 
-          If a captain's DM fails (error: <em>Cannot send messages to this user</em>), remind the captain in the tournament Discord server to enable DMs or ping them directly.
-        </p>
+
+        <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] font-medium text-slate-400">Message</label>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-500">Quick templates:</span>
+                <button
+                  type="button"
+                  onClick={() => handleApplyTemplate('selection')}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 rounded border border-slate-700/60 transition-colors"
+                >
+                  Selected
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleApplyTemplate('room')}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 rounded border border-slate-700/60 transition-colors"
+                >
+                  Room Details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleApplyTemplate('reminder')}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 rounded border border-slate-700/60 transition-colors"
+                >
+                  Reminder
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              rows={5}
+              value={messageContent}
+              onChange={(e) => setMessageContent(e.target.value)}
+              placeholder="Type message to captain..."
+              className="w-full px-4 py-3 bg-slate-900 border border-slate-700/70 rounded-xl text-slate-100 text-sm focus:outline-none focus:border-indigo-500 transition-colors resize-y min-h-[120px] leading-relaxed"
+            />
+
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+              <span className="text-slate-500">Insert tag:</span>
+              <button
+                type="button"
+                onClick={() => setMessageContent(prev => prev + ' {captain_name}')}
+                className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-indigo-400 rounded border border-slate-700/50"
+              >
+                {'{captain_name}'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setMessageContent(prev => prev + ' {team_name}')}
+                className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-indigo-400 rounded border border-slate-700/50"
+              >
+                {'{team_name}'}
+              </button>
+            </div>
+          </div>
+
+
+        {/* Alert Feedback */}
+        {resultAlert && (
+          <div className={`p-2.5 rounded-lg text-xs flex items-center gap-2 ${
+            resultAlert.type === 'success'
+              ? 'bg-emerald-950/40 border border-emerald-800/60 text-emerald-300'
+              : resultAlert.type === 'error'
+              ? 'bg-rose-950/40 border border-rose-800/60 text-rose-300'
+              : 'bg-blue-950/40 border border-blue-800/60 text-blue-300'
+          }`}>
+            {resultAlert.type === 'success' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+            {resultAlert.type === 'error' && <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+            {resultAlert.type === 'info' && <RefreshCw className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
+            <span>{resultAlert.message}</span>
+          </div>
+        )}
+
+        <div className="flex justify-end pt-1">
+          <button
+            type="button"
+            onClick={handleSendMessage}
+            disabled={isSending || !messageContent.trim()}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors flex items-center gap-2 shadow-sm shadow-indigo-600/30 whitespace-nowrap"
+          >
+            {isSending ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Sending DM...</span>
+              </>
+            ) : (
+              <>
+                <Send className="w-3.5 h-3.5" />
+                <span>Send Direct Message</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
-
-      {/* Selection DM Approval & Preview Modal */}
-      {isApprovalModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-          <div className="relative w-full max-w-xl rounded-2xl esports-card border border-white/10 p-6 shadow-2xl space-y-4">
-            <h3 className="text-xl font-bold text-white tracking-wide">
-              Approve Selection Notification Broadcast
-            </h3>
-            <p className="text-xs text-slate-300">
-              Please review the exact message template before broadcasting to all selected captains:
-            </p>
-
-            {/* Exact Required Message Preview Box */}
-            <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/30 font-mono text-xs text-slate-200 whitespace-pre-line leading-relaxed shadow-inner">
-              {`🎉 Congratulations, [Captain Name]!
-
-Your team, [Team Name], has been selected for today's Free Fire tournament match.
-
-Your match details and room password will be sent later. Please stay ready and keep an eye on your Discord messages.
-
-Good luck! 🔥`}
-            </div>
-
-            <div className="text-xs text-slate-400">
-              This message will be personalized and delivered directly to the Discord User ID of each of the <strong className="text-white">{selections.length} selected captains</strong>.
-            </div>
-
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                onClick={() => setIsApprovalModalOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSendBatchApproved}
-                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 shadow-lg shadow-emerald-950/40 cursor-pointer"
-              >
-                Approve & Broadcast
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Discord Bot Setup Tutorial Modal */}
-      {showTutorialModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-          <div className="relative w-full max-w-2xl rounded-2xl esports-card border border-white/10 p-6 shadow-2xl max-h-[85vh] overflow-y-auto space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <h3 className="text-lg font-bold text-white tracking-wide font-heading">
-                Discord Bot Setup Instructions
-              </h3>
-              <button
-                onClick={() => setShowTutorialModal(false)}
-                className="text-slate-400 hover:text-white text-xs font-bold"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="space-y-4 text-xs text-slate-300 leading-relaxed">
-              <div className="p-3 rounded-xl bg-slate-900 border border-white/5 space-y-1">
-                <span className="font-bold text-emerald-400">Step 1: Create Free Discord Application</span>
-                <p>Go to the <strong>Discord Developer Portal</strong> (discord.com/developers/applications), click <em>New Application</em>, and name it "Free Fire Tournament Bot".</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-900 border border-white/5 space-y-1">
-                <span className="font-bold text-emerald-400">Step 2: Create Bot & Enable Intents</span>
-                <p>Navigate to the <strong>Bot</strong> tab. Click <em>Add Bot</em>. Under <strong>Privileged Gateway Intents</strong>, enable <em>Server Members Intent</em>.</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-900 border border-white/5 space-y-1">
-                <span className="font-bold text-emerald-400">Step 3: Copy Bot Token Securely</span>
-                <p>Click <em>Reset Token</em> and copy your token. Paste it into <strong>Settings &gt; Discord Bot Token</strong> in this application. Your token is stored securely in local SQLite and never shared with anyone.</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-900 border border-white/5 space-y-1">
-                <span className="font-bold text-emerald-400">Step 4: Invite Bot to Your Tournament Server</span>
-                <p>Go to <strong>OAuth2 &gt; URL Generator</strong>. Select the <em>bot</em> scope. Select permissions: <em>Send Messages</em> and <em>Read Message History</em>. Copy the generated URL and invite the bot to your tournament server.</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-900 border border-white/5 space-y-1">
-                <span className="font-bold text-emerald-400">Step 5: Obtain Captains' Discord User IDs</span>
-                <p>In Discord, enable <strong>Developer Mode</strong> (User Settings &gt; Advanced &gt; Developer Mode). Right-click any captain's username and select <strong>Copy User ID</strong> (e.g. <code>108273645192837465</code>). Put this numeric ID into your Excel registration column.</p>
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => setShowTutorialModal(false)}
-                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 cursor-pointer"
-              >
-                Got It
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

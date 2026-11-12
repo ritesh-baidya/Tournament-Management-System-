@@ -24,7 +24,9 @@ export class ExcelService {
     ],
     captain_discord_id: [
       'captain discord user id', 'captain discord id', 'discord user id', 'discord id', 
-      'discord uid', 'captain discord', 'discord_id', 'discord_user_id', 'discord'
+      'discord uid', 'captain discord', 'discord_id', 'discord_user_id', 'discord',
+      'discord username', 'captain discord username', 'discord tag', 'discord handle',
+      'discord name', 'discord_username', 'username', 'captain discord name'
     ],
     player2_name: [
       'player 2 name', 'player 2', 'player2', 'player_2', 'player2 name', 'member 2', 'member2'
@@ -45,11 +47,28 @@ export class ExcelService {
    * Matches a raw header string to a standardized field name
    */
   private static matchHeader(rawHeader: string): string | null {
-    const normalized = rawHeader.toLowerCase().trim().replace(/[\-_]/g, ' ').replace(/\s+/g, ' ');
+    if (!rawHeader) return null;
+    const normalized = rawHeader.toLowerCase().trim().replace(/[\-_/\\()]/g, ' ').replace(/\s+/g, ' ');
     for (const [field, aliases] of Object.entries(this.headerMap)) {
       if (aliases.includes(normalized)) {
         return field;
       }
+    }
+    // High-confidence fallback matches
+    if (normalized.includes('discord')) {
+      return 'captain_discord_id';
+    }
+    if (normalized.includes('team') || normalized.includes('squad')) {
+      return 'team_name';
+    }
+    if (normalized.includes('captain') || normalized.includes('leader') || normalized.includes('igl')) {
+      if (normalized.includes('phone') || normalized.includes('mobile') || normalized.includes('whatsapp') || normalized.includes('contact')) {
+        return 'captain_phone';
+      }
+      return 'captain_name';
+    }
+    if (normalized.includes('phone') || normalized.includes('mobile') || normalized.includes('whatsapp')) {
+      return 'captain_phone';
     }
     return null;
   }
@@ -73,32 +92,53 @@ export class ExcelService {
       throw new Error('Excel sheet is empty');
     }
 
-    // First row is headers
-    const rawHeaders: string[] = (rawData[0] as any[]).map(h => String(h || '').trim());
+    // Dynamically find the header row in the first 5 rows
+    let headerRowIndex = 0;
+    let columnIndexToField: Record<number, string> = {};
     const detectedHeaders: Record<string, string> = {};
-    const columnIndexToField: Record<number, string> = {};
     const extraColumnIndices: Record<number, string> = {};
 
-    rawHeaders.forEach((header, idx) => {
-      if (!header) return;
-      const matched = this.matchHeader(header);
-      if (matched) {
-        detectedHeaders[header] = matched;
-        columnIndexToField[idx] = matched;
-      } else {
-        extraColumnIndices[idx] = header;
+    for (let r = 0; r < Math.min(rawData.length, 5); r++) {
+      const candidateHeaders = (rawData[r] as any[] || []).map(h => String(h || '').trim());
+      const candidateMap: Record<number, string> = {};
+      candidateHeaders.forEach((header, idx) => {
+        if (!header) return;
+        const matched = this.matchHeader(header);
+        if (matched) {
+          candidateMap[idx] = matched;
+          detectedHeaders[header] = matched;
+        }
+      });
+      if (Object.keys(candidateMap).length >= 1) {
+        headerRowIndex = r;
+        columnIndexToField = candidateMap;
+        // Also collect unmatched columns as extra columns
+        candidateHeaders.forEach((header, idx) => {
+          if (header && !candidateMap[idx]) {
+            extraColumnIndices[idx] = header;
+          }
+        });
+        break;
       }
-    });
+    }
+
+    // If no recognized headers, map by typical column layout
+    if (Object.keys(columnIndexToField).length === 0) {
+      columnIndexToField[0] = 'team_name';
+      columnIndexToField[1] = 'captain_name';
+      columnIndexToField[2] = 'captain_discord_id';
+      headerRowIndex = -1; // Data starts from row 0
+    }
 
     const existingTeamNamesSet = new Set(existingTeams.map(t => t.team_name.toLowerCase().trim()));
     const seenNamesInFile = new Set<string>();
 
     const rows: ExcelImportRow[] = [];
     let validCount = 0;
-    let invalidCount = 0;
     let duplicateCount = 0;
 
-    for (let r = 1; r < rawData.length; r++) {
+    const startRow = headerRowIndex + 1;
+    for (let r = startRow; r < rawData.length; r++) {
       const rowArr = rawData[r] as any[];
       if (!rowArr || rowArr.length === 0 || rowArr.every(cell => cell === undefined || cell === null || String(cell).trim() === '')) {
         continue; // Skip empty rows
@@ -108,6 +148,8 @@ export class ExcelService {
         rowIndex: r + 1,
         team_name: '',
         captain_name: '',
+        captain_phone: '',
+        captain_discord_id: '',
         extra_columns: {},
         validationErrors: [],
         isValid: true,
@@ -131,58 +173,88 @@ export class ExcelService {
         }
       });
 
-      // Validate required fields
-      if (!rowObj.team_name) {
-        rowObj.validationErrors.push('Missing Team Name');
-      }
-      if (!rowObj.captain_name) {
-        rowObj.validationErrors.push('Missing Captain Name');
+      // Check if Discord was placed in extra columns
+      if (!rowObj.captain_discord_id && rowObj.extra_columns) {
+        for (const [colName, val] of Object.entries(rowObj.extra_columns)) {
+          if (colName.toLowerCase().includes('discord') && val) {
+            rowObj.captain_discord_id = String(val).trim();
+            break;
+          }
+        }
       }
 
-      // Check Discord ID formatting (numeric snowflake if present)
+      // Check if Discord was placed in an unmapped cell
+      if (!rowObj.captain_discord_id) {
+        rowArr.forEach((cellVal) => {
+          let str = '';
+          if (typeof cellVal === 'number' && cellVal > 1e16) {
+            str = BigInt(Math.round(cellVal)).toString();
+          } else {
+            str = String(cellVal || '').trim();
+          }
+          if (str.startsWith('@') || /^\d{17,20}$/.test(str) || /^.+#[0-9]{4}$/.test(str)) {
+            rowObj.captain_discord_id = str;
+          }
+        });
+      }
+
+      // Smart auto-fill so valid but partially incomplete rows are preserved
+      let cleanCapt = (rowObj.captain_name || '').trim();
+      let cleanTeam = (rowObj.team_name || '').trim();
+      const cleanDiscord = (rowObj.captain_discord_id || '').trim();
+
+      // Skip phantom/ghost rows that have no team name, no captain name, and no discord ID
+      if (!cleanTeam && !cleanCapt && !cleanDiscord) {
+        continue;
+      }
+
+      if (!cleanCapt && cleanTeam) cleanCapt = `${cleanTeam} Leader`;
+      if (!cleanTeam && cleanCapt) cleanTeam = `${cleanCapt}'s Squad`;
+      if (!cleanTeam && !cleanCapt && cleanDiscord) {
+        cleanTeam = `Squad ${cleanDiscord}`;
+        cleanCapt = `Captain ${cleanDiscord}`;
+      }
+
+      rowObj.team_name = cleanTeam;
+      rowObj.captain_name = cleanCapt;
+
+      // Clean Discord ID or Username if present
       if (rowObj.captain_discord_id) {
-        const idStr = String(rowObj.captain_discord_id).trim();
-        // If someone entered a phone number or non-digit ID in discord column
-        if (idStr.includes('@') || idStr.includes('+') || (idStr.length < 16 && !/^\d+$/.test(idStr))) {
-          rowObj.validationErrors.push('Discord User ID must be a valid numeric Discord Snowflake ID (17-20 digits)');
+        let idStr = String(rowObj.captain_discord_id).trim();
+        // If parsed as scientific float, convert cleanly to full numeric string
+        if (/^\d+(\.\d+)?e\+\d+$/i.test(idStr)) {
+          try {
+            idStr = BigInt(Math.round(Number(idStr))).toString();
+          } catch {}
         }
+        if (idStr.startsWith('@')) {
+          idStr = idStr.slice(1).trim();
+        }
+        rowObj.captain_discord_id = idStr;
       }
 
-      // Check duplicates
+      // Check duplicates and auto-disambiguate
       const normalizedTeamName = (rowObj.team_name || '').toLowerCase().trim();
-      if (normalizedTeamName) {
-        if (seenNamesInFile.has(normalizedTeamName)) {
-          rowObj.isDuplicateInFile = true;
-          rowObj.validationErrors.push(`Duplicate team name in file: "${rowObj.team_name}"`);
-        } else {
-          seenNamesInFile.add(normalizedTeamName);
-        }
-
-        if (existingTeamNamesSet.has(normalizedTeamName)) {
-          rowObj.isDuplicateInDb = true;
-          // Note: In DB this can be treated as update or duplicate warning
-        }
-      }
-
-      if (rowObj.isDuplicateInFile || rowObj.isDuplicateInDb) {
+      if (seenNamesInFile.has(normalizedTeamName)) {
+        rowObj.isDuplicateInFile = true;
         duplicateCount++;
-      }
-
-      if (rowObj.validationErrors.length > 0) {
-        rowObj.isValid = false;
-        invalidCount++;
       } else {
-        rowObj.isValid = true;
-        validCount++;
+        seenNamesInFile.add(normalizedTeamName);
       }
 
+      if (existingTeamNamesSet.has(normalizedTeamName)) {
+        rowObj.isDuplicateInDb = true;
+      }
+
+      rowObj.isValid = true;
+      validCount++;
       rows.push(rowObj);
     }
 
     return {
       totalRows: rows.length,
       validRows: validCount,
-      invalidRows: invalidCount,
+      invalidRows: 0,
       duplicateRows: duplicateCount,
       detectedHeaders,
       rows
@@ -202,9 +274,9 @@ export class ExcelService {
     const workbook = XLSX.utils.book_new();
 
     // ----------------------------------------------------
-    // Sheet 1: All Teams
+    // Sheet 1: All Teams (Master Registry - Permanent)
     // ----------------------------------------------------
-    const allTeamsRows = allTeams.map((t, idx) => {
+    const allTeamsRows = allTeams.map((t) => {
       const players = t.players || [];
       const capt = players.find(p => p.is_captain || p.role === 'captain')?.player_name || t.captain_name;
       const p2 = players.find(p => p.role === 'player2')?.player_name || '';
@@ -218,11 +290,15 @@ export class ExcelService {
         'Captain Name': capt,
         'Captain Phone Number': t.captain_phone || '',
         'Captain Discord User ID': t.captain_discord_id || '',
+        'Tournament Stage': (t.current_stage || 'qualifying').toUpperCase(),
+        'Qualification Status': (t.qualification_status || 'pending').toUpperCase(),
+        'Participation Status': t.status.toUpperCase(),
+        'Matches Played': t.matches_played_count || 0,
+        'Last Match Result': t.last_match_result || 'N/A',
         'Player 2 Name': p2,
         'Player 3 Name': p3,
         'Player 4 Name': p4,
         'Substitute Player Name': sub,
-        'Participation Status': t.status.toUpperCase(),
         'Registration Date': t.created_at
       };
 
@@ -242,7 +318,7 @@ export class ExcelService {
     XLSX.utils.book_append_sheet(workbook, sheet1, 'All Teams');
 
     // ----------------------------------------------------
-    // Sheet 2: Eligible Teams (Used for the next spin wheel)
+    // Sheet 2: Eligible Teams (Ready for Current Stage Draw)
     // ----------------------------------------------------
     const eligibleTeamsRows = eligibleTeams.map((t) => {
       const players = t.players || [];
@@ -257,6 +333,8 @@ export class ExcelService {
         'Team Name': t.team_name,
         'Captain Name': capt,
         'Captain Discord User ID': t.captain_discord_id || '',
+        'Tournament Stage': (t.current_stage || 'qualifying').toUpperCase(),
+        'Qualification Status': (t.qualification_status || 'pending').toUpperCase(),
         'Player 2 Name': p2,
         'Player 3 Name': p3,
         'Player 4 Name': p4,
@@ -271,36 +349,46 @@ export class ExcelService {
     XLSX.utils.book_append_sheet(workbook, sheet2, 'Eligible Teams');
 
     // ----------------------------------------------------
-    // Sheet 3: Played Teams
+    // Sheet 3: Qualified Teams
     // ----------------------------------------------------
-    const playedTeamsRows = playedTeams.map((t) => {
-      const players = t.players || [];
-      const capt = players.find(p => p.is_captain || p.role === 'captain')?.player_name || t.captain_name;
-      const p2 = players.find(p => p.role === 'player2')?.player_name || '';
-      const p3 = players.find(p => p.role === 'player3')?.player_name || '';
-      const p4 = players.find(p => p.role === 'player4')?.player_name || '';
-      const sub = players.find(p => p.role === 'substitute')?.player_name || '';
+    const qualifiedTeams = allTeams.filter(t => t.qualification_status === 'qualified');
+    const qualifiedTeamsRows = qualifiedTeams.map((t) => ({
+      'Team ID': t.id,
+      'Team Name': t.team_name,
+      'Captain Name': t.captain_name,
+      'Captain Discord ID': t.captain_discord_id || '',
+      'Current Stage': (t.current_stage || 'qualifying').toUpperCase(),
+      'Matches Played': t.matches_played_count || 0,
+      'Last Result': t.last_match_result || 'QUALIFIED',
+      'Status': 'QUALIFIED'
+    }));
 
-      return {
-        'Team ID': t.id,
-        'Team Name': t.team_name,
-        'Captain Name': capt,
-        'Player 2 Name': p2,
-        'Player 3 Name': p3,
-        'Player 4 Name': p4,
-        'Substitute Player Name': sub,
-        'Participation Date': t.updated_at,
-        'Status': 'PLAYED (INELIGIBLE)'
-      };
-    });
-
-    const sheet3 = XLSX.utils.json_to_sheet(playedTeamsRows.length > 0 ? playedTeamsRows : [
-      { 'Team ID': '', 'Team Name': 'No played teams yet', 'Captain Name': '', 'Status': '' }
+    const sheet3 = XLSX.utils.json_to_sheet(qualifiedTeamsRows.length > 0 ? qualifiedTeamsRows : [
+      { 'Team ID': '', 'Team Name': 'No qualified teams yet', 'Captain Name': '', 'Status': '' }
     ]);
-    XLSX.utils.book_append_sheet(workbook, sheet3, 'Played Teams');
+    XLSX.utils.book_append_sheet(workbook, sheet3, 'Qualified Teams');
 
     // ----------------------------------------------------
-    // Sheet 4: Match History
+    // Sheet 4: Eliminated Teams
+    // ----------------------------------------------------
+    const eliminatedTeams = allTeams.filter(t => t.qualification_status === 'eliminated');
+    const eliminatedTeamsRows = eliminatedTeams.map((t) => ({
+      'Team ID': t.id,
+      'Team Name': t.team_name,
+      'Captain Name': t.captain_name,
+      'Eliminated At Stage': (t.current_stage || 'qualifying').toUpperCase(),
+      'Matches Played': t.matches_played_count || 0,
+      'Last Result': t.last_match_result || 'ELIMINATED',
+      'Status': 'ELIMINATED'
+    }));
+
+    const sheet4 = XLSX.utils.json_to_sheet(eliminatedTeamsRows.length > 0 ? eliminatedTeamsRows : [
+      { 'Team ID': '', 'Team Name': 'No eliminated teams', 'Captain Name': '', 'Status': '' }
+    ]);
+    XLSX.utils.book_append_sheet(workbook, sheet4, 'Eliminated Teams');
+
+    // ----------------------------------------------------
+    // Sheet 5: Match History
     // ----------------------------------------------------
     const matchHistoryRows: Record<string, any>[] = [];
     for (const m of matches) {
@@ -314,11 +402,13 @@ export class ExcelService {
 
         matchHistoryRows.push({
           'Match Number': m.match_number,
+          'Tournament Stage': (m.stage || tp.stage || 'qualifying').toUpperCase(),
           'Draw ID': m.draw_id || 'N/A',
           'Team Name': tp.team_name || '',
           'Captain Name': tp.captain_name || '',
           'Selection Order': tp.selection_order || 'N/A',
           'Actually Played': tp.actually_played ? 'YES' : 'NO (FORFEIT/NO-SHOW)',
+          'Match Result': (tp.result || (tp.actually_played ? 'COMPLETED' : 'FORFEIT')).toUpperCase(),
           'Player Participation Info': participatedPlayersStr || 'Full Roster',
           'Match Date': m.match_date || '',
           'Match Time': m.match_time || '',
@@ -328,19 +418,20 @@ export class ExcelService {
       }
     }
 
-    const sheet4 = XLSX.utils.json_to_sheet(matchHistoryRows.length > 0 ? matchHistoryRows : [
-      { 'Match Number': '', 'Draw ID': '', 'Team Name': 'No match history recorded', 'Captain Name': '', 'Actually Played': '' }
+    const sheet5 = XLSX.utils.json_to_sheet(matchHistoryRows.length > 0 ? matchHistoryRows : [
+      { 'Match Number': '', 'Tournament Stage': '', 'Team Name': 'No match history recorded', 'Captain Name': '', 'Actually Played': '' }
     ]);
-    XLSX.utils.book_append_sheet(workbook, sheet4, 'Match History');
+    XLSX.utils.book_append_sheet(workbook, sheet5, 'Match History');
 
     // ----------------------------------------------------
-    // Sheet 5: Selected Teams (Most recent draw)
+    // Sheet 6: Selected Teams (Most recent draw)
     // ----------------------------------------------------
     const selectedRows: Record<string, any>[] = [];
     if (latestDraw && latestDraw.selections) {
       for (const s of latestDraw.selections) {
         selectedRows.push({
           'Draw Number': latestDraw.draw_number,
+          'Stage': (latestDraw.stage || 'qualifying').toUpperCase(),
           'Selection Order': s.selection_order,
           'Team Name': s.team_name,
           'Captain Name': s.captain_name,
@@ -353,10 +444,10 @@ export class ExcelService {
       }
     }
 
-    const sheet5 = XLSX.utils.json_to_sheet(selectedRows.length > 0 ? selectedRows : [
+    const sheet6 = XLSX.utils.json_to_sheet(selectedRows.length > 0 ? selectedRows : [
       { 'Draw Number': '', 'Selection Order': '', 'Team Name': 'No draw selections active', 'Captain Name': '', 'Notification Status': '' }
     ]);
-    XLSX.utils.book_append_sheet(workbook, sheet5, 'Selected Teams');
+    XLSX.utils.book_append_sheet(workbook, sheet6, 'Selected Teams');
 
     // Write to buffer
     const outBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });

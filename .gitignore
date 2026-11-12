@@ -6,4 +6,5 @@ release/
 *.db
 *.db.tmp
 *.tmp_*
+discord-config.json
 .DS_Store

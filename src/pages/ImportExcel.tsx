@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   FileSpreadsheet, Upload, CheckCircle2, AlertTriangle, 
-  Trash2, Edit2, Download, Search, RefreshCw, Check, X, ShieldAlert 
+  Trash2, Edit2, Search, RefreshCw, Check, X, 
+  Users
 } from 'lucide-react';
 import { ExcelImportPreview, ExcelImportRow } from '../types';
-import { ConfirmationModal } from '../components/ConfirmationModal';
 import { PageId } from '../components/Sidebar';
 
 interface ImportExcelProps {
@@ -12,200 +13,405 @@ interface ImportExcelProps {
   onImportComplete: () => void;
 }
 
+const HEADER_MAP: Record<string, string[]> = {
+  team_name: [
+    'team name', 'team', 'team_name', 'squad name', 'squad', 'teamname', 'squad_name', 'teams', 'team_title'
+  ],
+  captain_name: [
+    'captain name', 'captain', 'leader', 'captain_name', 'leader name', 'leader_name', 'igl', 'player 1', 'player1', 'name'
+  ],
+  captain_phone: [
+    'captain phone number', 'captain phone', 'phone number', 'phone', 'mobile number', 
+    'mobile', 'contact', 'whatsapp', 'captain mobile', 'captain_phone'
+  ],
+  captain_discord_id: [
+    'captain discord user id', 'captain discord id', 'discord user id', 'discord id', 
+    'discord uid', 'captain discord', 'discord_id', 'discord_user_id', 'discord',
+    'discord username', 'captain discord username', 'discord tag', 'discord handle',
+    'discord name', 'discord_username', 'username', 'captain discord name', 'discord user'
+  ]
+};
+
 export const ImportExcel: React.FC<ImportExcelProps> = ({ onNavigate, onImportComplete }) => {
   const [preview, setPreview] = useState<ExcelImportPreview | null>(null);
   const [filePath, setFilePath] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'valid' | 'invalid' | 'duplicate'>('all');
-  const [editingRowIndex, setEditingRowIndex] = useState<number | null>(null);
-  const [editFormData, setEditFormData] = useState<Partial<ExcelImportRow>>({});
-  const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [importStatusMessage, setImportStatusMessage] = useState<string | null>(null);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [currentDbCount, setCurrentDbCount] = useState<number | null>(null);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const fetchDbCount = async () => {
+    try {
+      const api = (window as any).electronAPI;
+      if (api && api.getAllTeams) {
+        const res = await api.getAllTeams();
+        if (res.success && res.data) {
+          setCurrentDbCount(res.data.length);
+        }
+      }
+    } catch {}
+  };
+
+  React.useEffect(() => {
+    fetchDbCount();
+    const handleTeamsUpdated = () => fetchDbCount();
+    window.addEventListener('teams-updated', handleTeamsUpdated);
+    return () => window.removeEventListener('teams-updated', handleTeamsUpdated);
+  }, []);
+
+  // Auto-dismiss the status message after exactly 2 seconds
+  React.useEffect(() => {
+    if (!importStatusMessage) return;
+    const timer = setTimeout(() => {
+      setImportStatusMessage(null);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [importStatusMessage]);
+
+  const handleClearDatabase = async () => {
+    if (!window.confirm('Are you sure you want to clear all teams from the database? This will remove all existing teams so you can re-import cleanly.')) return;
+    try {
+      const api = (window as any).electronAPI;
+      if (api && api.clearAllTeams) {
+        await api.clearAllTeams();
+        setCurrentDbCount(0);
+        setPreview(null);
+        setImportStatusMessage('Database cleared.');
+        window.dispatchEvent(new Event('teams-updated'));
+        onImportComplete();
+      }
+    } catch (e: any) {
+      alert(`Failed to clear database: ${e.message}`);
+    }
+  };
+
+  // Trigger file selection
   const handleOpenFileDialog = async () => {
     try {
       const api = (window as any).electronAPI;
-      if (!api) return;
-
-      const res = await api.openAndPreviewExcel();
-      if (res.success && res.data) {
-        setPreview(res.data.preview);
-        setFilePath(res.data.filePath);
-        setImportStatusMessage(null);
-      }
-    } catch (err: any) {
-      alert(`Error opening Excel file: ${err.message}`);
-    }
-  };
-
-  const handleDownloadSampleTemplate = async () => {
-    try {
-      const api = (window as any).electronAPI;
-      if (!api) return;
-      const res = await api.downloadSampleTemplate();
-      if (res.success && res.data?.filePath) {
-        alert(`Sample template saved successfully to:\n${res.data.filePath}`);
-      }
-    } catch (err: any) {
-      alert(`Failed to save template: ${err.message}`);
-    }
-  };
-
-  const handleDeleteRow = (rowIndex: number) => {
-    if (!preview) return;
-    const updatedRows = preview.rows.filter(r => r.rowIndex !== rowIndex);
-    // Recalculate counts
-    const validCount = updatedRows.filter(r => r.isValid).length;
-    const invalidCount = updatedRows.filter(r => !r.isValid).length;
-    const duplicateCount = updatedRows.filter(r => r.isDuplicateInFile || r.isDuplicateInDb).length;
-
-    setPreview({
-      ...preview,
-      totalRows: updatedRows.length,
-      validRows: validCount,
-      invalidRows: invalidCount,
-      duplicateRows: duplicateCount,
-      rows: updatedRows
-    });
-  };
-
-  const handleStartEdit = (row: ExcelImportRow) => {
-    setEditingRowIndex(row.rowIndex);
-    setEditFormData({ ...row });
-  };
-
-  const handleSaveEdit = (rowIndex: number) => {
-    if (!preview) return;
-    const updatedRows = preview.rows.map(r => {
-      if (r.rowIndex === rowIndex) {
-        const teamName = (editFormData.team_name || '').trim();
-        const captName = (editFormData.captain_name || '').trim();
-        const errors: string[] = [];
-
-        if (!teamName) errors.push('Missing Team Name');
-        if (!captName) errors.push('Missing Captain Name');
-
-        const discordId = editFormData.captain_discord_id?.trim();
-        if (discordId && (!/^\d{17,20}$/.test(discordId))) {
-          errors.push('Discord User ID must be 17-20 numeric digits');
+      if (api && api.openAndPreviewExcel) {
+        const res = await api.openAndPreviewExcel();
+        if (res.success && res.data) {
+          setPreview(res.data.preview);
+          setFilePath(res.data.filePath);
+          // Auto-commit right away so all other pages get the data!
+          await commitTeams(res.data.preview.rows || []);
+          return;
         }
-
-        return {
-          ...r,
-          ...editFormData,
-          team_name: teamName,
-          captain_name: captName,
-          isValid: errors.length === 0,
-          validationErrors: errors
-        };
       }
-      return r;
-    });
+    } catch {}
 
-    const validCount = updatedRows.filter(r => r.isValid).length;
-    const invalidCount = updatedRows.filter(r => !r.isValid).length;
-
-    setPreview({
-      ...preview,
-      validRows: validCount,
-      invalidRows: invalidCount,
-      rows: updatedRows
-    });
-    setEditingRowIndex(null);
+    // HTML5 file input fallback
+    fileInputRef.current?.click();
   };
 
-  const handleCommitImport = async () => {
-    if (!preview || preview.rows.length === 0) return;
+  // Commit teams to database / storage so all pages have access immediately
+  const commitTeams = async (rowsToCommit: ExcelImportRow[]) => {
+    if (!rowsToCommit || rowsToCommit.length === 0) {
+      alert('The uploaded Excel file contained 0 valid rows.');
+      return;
+    }
     setIsImporting(true);
     try {
       const api = (window as any).electronAPI;
-      const validRowsToImport = preview.rows.filter(r => r.isValid);
-      const res = await api.commitExcelImport(validRowsToImport);
-
-      if (res.success) {
-        setImportStatusMessage(`Successfully imported ${res.data.inserted} new teams and updated ${res.data.updated} existing rosters!`);
-        onImportComplete();
-        setTimeout(() => {
-          onNavigate('all-teams');
-        }, 1200);
-      } else {
-        alert(`Import failed: ${res.error}`);
+      if (api && api.commitExcelImport) {
+        const res = await api.commitExcelImport(rowsToCommit, 'replace');
+        if (res.success) {
+          const count = res.data?.insertedCount ?? res.data?.inserted ?? rowsToCommit.length;
+          setImportedCount(count);
+          setImportStatusMessage(`Imported ${count} teams!`);
+          onImportComplete();
+          window.dispatchEvent(new Event('teams-updated'));
+        } else {
+          alert(`Import failed: ${res.error}`);
+        }
       }
     } catch (err: any) {
       alert(`Import error: ${err.message}`);
     } finally {
       setIsImporting(false);
-      setIsConfirmModalOpen(false);
     }
   };
+
+  // Parse file selected via HTML5 input
+  const handleFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setFilePath(file.name);
+    setIsImporting(true);
+    setImportStatusMessage(null);
+
+    const reader = new FileReader();
+
+    reader.onload = async (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        if (!sheetName) throw new Error('No sheets found in workbook.');
+
+        const worksheet = workbook.Sheets[sheetName];
+        const rawData = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { header: 1 });
+        if (!rawData || rawData.length === 0) throw new Error('Uploaded Excel file is empty.');
+
+        // Dynamically find the header row in the first 5 rows
+        let headerRowIndex = 0;
+        let colToField: Record<number, string> = {};
+
+        for (let r = 0; r < Math.min(rawData.length, 5); r++) {
+          const candidateHeaders = (rawData[r] as any[] || []).map(h => String(h || '').trim());
+          const candidateMap: Record<number, string> = {};
+          candidateHeaders.forEach((h, idx) => {
+            if (!h) return;
+            const norm = h.toLowerCase().trim().replace(/[\-_/\\()]/g, ' ').replace(/\s+/g, ' ');
+            for (const [field, aliases] of Object.entries(HEADER_MAP)) {
+              if (aliases.includes(norm)) {
+                candidateMap[idx] = field;
+                break;
+              }
+            }
+            if (!candidateMap[idx]) {
+              if (norm.includes('discord')) candidateMap[idx] = 'captain_discord_id';
+              else if (norm.includes('team') || norm.includes('squad')) candidateMap[idx] = 'team_name';
+              else if (norm.includes('captain') || norm.includes('leader') || norm.includes('igl')) {
+                if (norm.includes('phone') || norm.includes('mobile') || norm.includes('whatsapp') || norm.includes('contact')) candidateMap[idx] = 'captain_phone';
+                else candidateMap[idx] = 'captain_name';
+              }
+              else if (norm.includes('phone') || norm.includes('mobile') || norm.includes('whatsapp')) candidateMap[idx] = 'captain_phone';
+            }
+          });
+          if (Object.keys(candidateMap).length >= 1) {
+            headerRowIndex = r;
+            colToField = candidateMap;
+            break;
+          }
+        }
+
+        // If no headers matched at all, default columns by position
+        if (Object.keys(colToField).length === 0) {
+          colToField[0] = 'team_name';
+          colToField[1] = 'captain_name';
+          colToField[2] = 'captain_discord_id';
+          headerRowIndex = -1; // Data starts at row 0
+        }
+
+        const seenNames = new Set<string>();
+        const rows: ExcelImportRow[] = [];
+        let validCount = 0;
+        let dupCount = 0;
+
+        const startRow = headerRowIndex + 1;
+        for (let r = startRow; r < rawData.length; r++) {
+          const rowArr = rawData[r] as any[];
+          if (!rowArr || rowArr.length === 0 || rowArr.every(c => c === undefined || c === null || String(c).trim() === '')) {
+            continue;
+          }
+
+          const rowObj: any = {
+            rowIndex: r + 1,
+            team_name: '',
+            captain_name: '',
+            captain_discord_id: '',
+            captain_phone: '',
+            extra_columns: {},
+            validationErrors: [],
+            isValid: true,
+            isDuplicateInFile: false,
+            isDuplicateInDb: false
+          };
+
+          Object.entries(colToField).forEach(([idxStr, field]) => {
+            const idx = parseInt(idxStr, 10);
+            let val = '';
+            if (rowArr[idx] !== undefined && rowArr[idx] !== null) {
+              if (typeof rowArr[idx] === 'number' && rowArr[idx] > 1e16) {
+                val = BigInt(Math.round(rowArr[idx])).toString();
+              } else {
+                val = String(rowArr[idx]).trim();
+              }
+            }
+            rowObj[field] = val;
+          });
+
+          // Check if Discord was placed in an unmapped cell
+          if (!rowObj.captain_discord_id) {
+            rowArr.forEach((cellVal) => {
+              let str = '';
+              if (typeof cellVal === 'number' && cellVal > 1e16) {
+                str = BigInt(Math.round(cellVal)).toString();
+              } else {
+                str = String(cellVal || '').trim();
+              }
+              if (str.startsWith('@') || /^\d{17,20}$/.test(str) || /^.+#[0-9]{4}$/.test(str)) {
+                rowObj.captain_discord_id = str;
+              }
+            });
+          }
+
+          // Smart auto-fill so valid but incomplete rows are preserved
+          let cleanCapt = (rowObj.captain_name || '').trim();
+          let cleanTeam = (rowObj.team_name || '').trim();
+          const cleanDiscord = (rowObj.captain_discord_id || '').trim();
+
+          // Skip phantom/ghost rows that have no team name, no captain name, and no discord ID
+          if (!cleanTeam && !cleanCapt && !cleanDiscord) {
+            continue;
+          }
+
+          if (!cleanCapt && cleanTeam) cleanCapt = cleanTeam;
+          if (!cleanTeam && cleanCapt) cleanTeam = `${cleanCapt}'s Squad`;
+          if (!cleanTeam && !cleanCapt && cleanDiscord) {
+            cleanTeam = `Squad ${cleanDiscord}`;
+            cleanCapt = `Captain ${cleanDiscord}`;
+          }
+
+          rowObj.team_name = cleanTeam;
+          rowObj.captain_name = cleanCapt;
+
+          // Clean Discord ID or Username
+          if (rowObj.captain_discord_id) {
+            let idStr = String(rowObj.captain_discord_id).trim();
+            if (/^\d+(\.\d+)?e\+\d+$/i.test(idStr)) {
+              try {
+                idStr = BigInt(Math.round(Number(idStr))).toString();
+              } catch {}
+            }
+            if (idStr.startsWith('@')) idStr = idStr.slice(1).trim();
+            rowObj.captain_discord_id = idStr;
+          }
+
+          const normTeam = cleanTeam.toLowerCase();
+          if (seenNames.has(normTeam)) {
+            rowObj.isDuplicateInFile = true;
+            dupCount++;
+          } else {
+            seenNames.add(normTeam);
+          }
+
+          rowObj.isValid = true;
+          validCount++;
+          rows.push(rowObj);
+        }
+
+        setPreview({
+          totalRows: rows.length,
+          validRows: validCount,
+          invalidRows: 0,
+          duplicateRows: dupCount,
+          detectedHeaders: colToField,
+          rows
+        });
+
+        // Automatically commit into database right away so all pages have the data!
+        await commitTeams(rows);
+      } catch (err: any) {
+        alert(`Failed to parse Excel file: ${err.message}`);
+        setIsImporting(false);
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+    event.target.value = '';
+  };
+
+
 
   const filteredRows = preview?.rows.filter(row => {
     const matchesSearch = 
       row.team_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       row.captain_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (row.captain_phone && row.captain_phone.includes(searchQuery));
+      (row.captain_discord_id && row.captain_discord_id.toLowerCase().includes(searchQuery.toLowerCase()));
 
     if (!matchesSearch) return false;
-
     if (filterType === 'valid') return row.isValid;
-    if (filterType === 'invalid') return !row.isValid;
     if (filterType === 'duplicate') return row.isDuplicateInFile || row.isDuplicateInDb;
     return true;
   }) || [];
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto h-full">
+    <div className="p-6 md:p-8 space-y-6 max-w-7xl mx-auto h-full overflow-y-auto">
+      {/* Hidden File Input */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileInputChange}
+        accept=".xlsx, .xls, .csv"
+        className="hidden"
+      />
+
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/10">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
         <div>
-          <h1 className="text-2xl font-extrabold text-white tracking-wide font-heading flex items-center gap-2">
-            <FileSpreadsheet className="text-emerald-400" size={26} />
-            EXCEL ROSTER IMPORT & VALIDATION
+          <h1 className="text-2xl font-bold text-white flex items-center gap-3">
+            <FileSpreadsheet className="text-emerald-400 w-7 h-7" />
+            Import Master Excel
           </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Import .xlsx or .xls files with team names, captain contact, full 4-player rosters, substitutes, and custom columns.
-          </p>
         </div>
 
         <div className="flex items-center gap-3">
           <button
-            onClick={handleDownloadSampleTemplate}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center gap-2 cursor-pointer transition-colors"
-          >
-            <Download size={15} />
-            Download Sample Template (.xlsx)
-          </button>
-
-          <button
+            type="button"
             onClick={handleOpenFileDialog}
-            className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-lg shadow-emerald-950/40 flex items-center gap-2 cursor-pointer transition-all"
+            disabled={isImporting}
+            className="px-5 py-2.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 shadow-lg shadow-emerald-950/40 flex items-center gap-2 cursor-pointer transition-all"
           >
-            <Upload size={16} />
-            Browse & Preview Excel File
+            {isImporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload size={16} />}
+            <span>{isImporting ? 'Importing File...' : 'Import File'}</span>
           </button>
         </div>
       </div>
 
-      {importStatusMessage && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm flex items-center gap-3">
-          <CheckCircle2 size={20} className="shrink-0 text-emerald-400" />
-          <span>{importStatusMessage}</span>
+      {/* Database Status Banner */}
+      {currentDbCount !== null && currentDbCount > 0 && (
+        <div className="flex items-center justify-between p-3.5 bg-slate-900/90 border border-slate-800 rounded-xl text-xs animate-fadeIn">
+          <div className="flex items-center gap-2.5 text-slate-300">
+            <Users className="w-4 h-4 text-blue-400" />
+            <span>Currently registered teams in database: <strong className="text-white font-mono text-sm">{currentDbCount.toLocaleString()}</strong></span>
+            <span className="text-slate-500 hidden sm:inline">• Re-uploading Excel will replace active roster cleanly</span>
+          </div>
+          <button
+            onClick={handleClearDatabase}
+            className="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded-lg text-xs font-semibold border border-rose-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Clear Existing Teams</span>
+          </button>
         </div>
       )}
 
-      {/* No file chosen placeholder */}
+      {/* Success Notification Banner */}
+      {importStatusMessage && (
+        <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/80 via-slate-900 to-emerald-950/50 border border-emerald-500/40 shadow-xl text-slate-200 animate-fadeIn flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 text-emerald-300 font-semibold text-sm">
+            <CheckCircle2 size={22} className="text-emerald-400 shrink-0" />
+            <span>{importStatusMessage}</span>
+          </div>
+          <button
+            onClick={() => setImportStatusMessage(null)}
+            className="text-slate-400 hover:text-white text-xs px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+          >
+            ✕ Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Upload Dropzone */}
       {!preview && (
         <div 
           onClick={handleOpenFileDialog}
-          className="border-2 border-dashed border-white/10 hover:border-emerald-500/40 rounded-2xl p-12 text-center transition-all cursor-pointer bg-slate-900/30 hover:bg-slate-900/50 group"
+          className="border-2 border-dashed border-slate-700/80 hover:border-emerald-500/60 rounded-2xl p-12 text-center transition-all cursor-pointer bg-[#121622]/60 hover:bg-[#121622] group shadow-xl"
         >
           <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
             <Upload size={32} />
           </div>
-          <h3 className="text-lg font-bold text-white mb-1">Click to Select Registration Excel File</h3>
-          <p className="text-xs text-slate-400 max-w-md mx-auto">
-            Supports .xlsx and .xls workbooks. Column variations like "Team Name", "Leader", "Discord ID", "Player 2", "Substitute", and extra player columns are automatically mapped.
+          <h3 className="text-lg font-bold text-white mb-1">Import File (.xlsx, .xls, .csv)</h3>
+          <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+            Upload your sheet with up to 2,000+ teams. All teams are automatically imported into the single master database for the Spin Wheel and Discord Bot.
           </p>
         </div>
       )}
@@ -213,236 +419,60 @@ export const ImportExcel: React.FC<ImportExcelProps> = ({ onNavigate, onImportCo
       {/* Preview Section */}
       {preview && (
         <div className="space-y-4">
-          {/* File summary bar */}
-          <div className="p-4 rounded-xl esports-card border border-white/10 flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <span className="text-xs text-slate-400">Loaded Workbook:</span>
-              <div className="font-mono text-xs font-semibold text-emerald-400 truncate max-w-md">{filePath}</div>
-            </div>
 
-            <div className="flex items-center gap-4 text-xs">
-              <div className="px-3 py-1.5 rounded-lg bg-slate-800/80 border border-white/5">
-                <span className="text-slate-400 mr-2">Total Rows:</span>
-                <span className="font-bold text-white font-mono">{preview.totalRows}</span>
-              </div>
-              <div className="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
-                <span className="mr-2">Valid:</span>
-                <span className="font-bold font-mono">{preview.validRows}</span>
-              </div>
-              {preview.invalidRows > 0 && (
-                <div className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400">
-                  <span className="mr-2">Invalid:</span>
-                  <span className="font-bold font-mono">{preview.invalidRows}</span>
-                </div>
-              )}
-              {preview.duplicateRows > 0 && (
-                <div className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400">
-                  <span className="mr-2">Duplicates:</span>
-                  <span className="font-bold font-mono">{preview.duplicateRows}</span>
-                </div>
-              )}
-            </div>
-
-            <button
-              onClick={() => setIsConfirmModalOpen(true)}
-              disabled={preview.validRows === 0}
-              className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 shadow-lg shadow-emerald-950/40 cursor-pointer transition-all flex items-center gap-2"
-            >
-              <CheckCircle2 size={16} />
-              <span>Confirm & Save {preview.validRows} Teams to Database</span>
-            </button>
-          </div>
-
-          {/* Search & Filter Toolbar */}
+          {/* Search Toolbar */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="relative w-full sm:w-72">
+            <div className="relative w-full sm:w-80">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
-                placeholder="Search teams or captains..."
+                placeholder="Search imported team, captain, or Discord..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
               />
-            </div>
-
-            <div className="flex items-center gap-2 text-xs">
-              {(['all', 'valid', 'invalid', 'duplicate'] as const).map((ft) => (
-                <button
-                  key={ft}
-                  onClick={() => setFilterType(ft)}
-                  className={`px-3 py-1.5 rounded-lg font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
-                    filterType === ft
-                      ? 'bg-emerald-500 text-black'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {ft}
-                </button>
-              ))}
             </div>
           </div>
 
           {/* Table */}
-          <div className="rounded-xl esports-card border border-white/10 overflow-hidden shadow-xl">
-            <div className="overflow-x-auto max-h-[480px]">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead className="bg-[#090D17] text-slate-400 uppercase tracking-wider font-heading sticky top-0 z-10 border-b border-white/10">
+          <div className="bg-[#121622] border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+            <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)]">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-900/80 border-b border-slate-800 text-slate-400 sticky top-0 uppercase tracking-wider">
                   <tr>
-                    <th className="py-3 px-3">#</th>
-                    <th className="py-3 px-3">Status</th>
-                    <th className="py-3 px-3">Team Name</th>
-                    <th className="py-3 px-3">Captain Name</th>
-                    <th className="py-3 px-3">Discord User ID</th>
-                    <th className="py-3 px-3">Phone</th>
-                    <th className="py-3 px-3">Player 2</th>
-                    <th className="py-3 px-3">Player 3</th>
-                    <th className="py-3 px-3">Player 4</th>
-                    <th className="py-3 px-3">Sub</th>
-                    <th className="py-3 px-3 text-right">Actions</th>
+                    <th className="py-3 px-4">#</th>
+                    <th className="py-3 px-4">Team Name</th>
+                    <th className="py-3 px-4">Captain Name</th>
+                    <th className="py-3 px-4">Discord Username / ID</th>
+                    <th className="py-3 px-4">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-white/5">
-                  {filteredRows.map((row) => {
-                    const isEditing = editingRowIndex === row.rowIndex;
-
-                    return (
-                      <tr 
-                        key={row.rowIndex}
-                        className={`hover:bg-slate-800/40 transition-colors ${
-                          !row.isValid ? 'bg-rose-950/20' : row.isDuplicateInDb ? 'bg-amber-950/10' : ''
-                        }`}
-                      >
-                        <td className="py-3 px-3 font-mono text-slate-500">{row.rowIndex}</td>
-                        <td className="py-3 px-3">
-                          {row.isValid ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                              <Check size={10} /> Valid
-                            </span>
-                          ) : (
-                            <span 
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20 cursor-help"
-                              title={row.validationErrors.join(', ')}
-                            >
-                              <X size={10} /> Invalid
-                            </span>
-                          )}
-                          {row.isDuplicateInDb && (
-                            <span className="ml-1 text-[9px] font-bold text-amber-400">(In DB)</span>
-                          )}
-                        </td>
-
-                        {/* Team Name */}
-                        <td className="py-3 px-3 font-semibold text-white">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editFormData.team_name || ''}
-                              onChange={(e) => setEditFormData({ ...editFormData, team_name: e.target.value })}
-                              className="px-2 py-1 bg-slate-900 border border-emerald-500 rounded text-xs text-white"
-                            />
-                          ) : (
-                            row.team_name || <span className="text-rose-400 italic font-normal">Missing</span>
-                          )}
-                        </td>
-
-                        {/* Captain Name */}
-                        <td className="py-3 px-3 text-slate-200">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editFormData.captain_name || ''}
-                              onChange={(e) => setEditFormData({ ...editFormData, captain_name: e.target.value })}
-                              className="px-2 py-1 bg-slate-900 border border-emerald-500 rounded text-xs text-white"
-                            />
-                          ) : (
-                            row.captain_name || <span className="text-rose-400 italic">Missing</span>
-                          )}
-                        </td>
-
-                        {/* Discord ID */}
-                        <td className="py-3 px-3 font-mono text-slate-300">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editFormData.captain_discord_id || ''}
-                              onChange={(e) => setEditFormData({ ...editFormData, captain_discord_id: e.target.value })}
-                              className="px-2 py-1 bg-slate-900 border border-emerald-500 rounded text-xs text-white font-mono"
-                            />
-                          ) : (
-                            row.captain_discord_id || '—'
-                          )}
-                        </td>
-
-                        {/* Phone */}
-                        <td className="py-3 px-3 text-slate-400">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editFormData.captain_phone || ''}
-                              onChange={(e) => setEditFormData({ ...editFormData, captain_phone: e.target.value })}
-                              className="px-2 py-1 bg-slate-900 border border-emerald-500 rounded text-xs text-white"
-                            />
-                          ) : (
-                            row.captain_phone || '—'
-                          )}
-                        </td>
-
-                        {/* Roster players */}
-                        <td className="py-3 px-3 text-slate-400">{row.player2_name || '—'}</td>
-                        <td className="py-3 px-3 text-slate-400">{row.player3_name || '—'}</td>
-                        <td className="py-3 px-3 text-slate-400">{row.player4_name || '—'}</td>
-                        <td className="py-3 px-3 text-slate-400">{row.substitute_name || '—'}</td>
-
-                        {/* Actions */}
-                        <td className="py-3 px-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            {isEditing ? (
-                              <button
-                                onClick={() => handleSaveEdit(row.rowIndex)}
-                                className="p-1 rounded text-emerald-400 hover:bg-emerald-500/20"
-                                title="Save Changes"
-                              >
-                                <Check size={15} />
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => handleStartEdit(row)}
-                                className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800"
-                                title="Edit Row"
-                              >
-                                <Edit2 size={14} />
-                              </button>
-                            )}
-
-                            <button
-                              onClick={() => handleDeleteRow(row.rowIndex)}
-                              className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
-                              title="Remove Row"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                <tbody className="divide-y divide-slate-800/60">
+                  {filteredRows.map((row, idx) => (
+                    <tr key={row.rowIndex} className="hover:bg-slate-800/30 transition-colors">
+                      <td className="py-2.5 px-4 text-slate-500 font-mono">{idx + 1}</td>
+                      <td className="py-2.5 px-4 font-semibold text-slate-200">
+                        {row.team_name}
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-300">
+                        {row.captain_name}
+                      </td>
+                      <td className="py-2.5 px-4 font-mono text-indigo-300">
+                        {row.captain_discord_id || <span className="text-slate-600">—</span>}
+                      </td>
+                      <td className="py-2.5 px-4">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400">
+                          <Check size={14} /> Active in System
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           </div>
         </div>
       )}
-
-      {/* Confirmation Modal */}
-      <ConfirmationModal
-        isOpen={isConfirmModalOpen}
-        title="Confirm Excel Team Import"
-        message={`Are you sure you want to import ${preview?.validRows || 0} valid team registrations into the tournament database?\n\nExisting teams with matching names will have their rosters and contact info updated, while keeping historical match data intact.`}
-        confirmText={isImporting ? 'Importing...' : 'Yes, Import Teams'}
-        onConfirm={handleCommitImport}
-        onCancel={() => setIsConfirmModalOpen(false)}
-      />
     </div>
   );
 };

@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { 
-  Settings as SettingsIcon, Shield, Key, Bell, Volume2, 
-  VolumeX, Save, CheckCircle2, AlertCircle, Plus, Trash2, 
-  RotateCcw, History, Lock, Radio 
+  Settings as SettingsIcon, Shield, Key, 
+  Save, CheckCircle2, AlertCircle, Trash2, 
+  RefreshCw, Radio, ExternalLink, HelpCircle
 } from 'lucide-react';
-import { TournamentSettings, AuditLog } from '../types';
-import { soundManager } from '../utils/audio';
-import { formatDate } from '../utils/helpers';
+import { TournamentSettings } from '../types';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 import { PageId } from '../components/Sidebar';
 
 interface SettingsProps {
@@ -16,38 +15,34 @@ interface SettingsProps {
 
 export const Settings: React.FC<SettingsProps> = ({ onNavigate, onRefreshGlobalStats }) => {
   const [settings, setSettings] = useState<TournamentSettings>({
-    tournament_name: 'Free Fire Championship 2026',
+    tournament_name: 'Free Fire Championship',
     rotation_policy: 'one_time',
     selection_target: 12,
     discord_bot_token: '',
     discord_guild_id: '',
-    sound_enabled: true,
+    sound_enabled: false,
     rules: []
   });
 
-  const [botTestResult, setBotTestResult] = useState<{ testing: boolean; success?: boolean; message?: string }>({ testing: false });
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [newRuleInput, setNewRuleInput] = useState('');
+  const [botTestResult, setBotTestResult] = useState<{ 
+    testing: boolean; 
+    success?: boolean; 
+    message?: string 
+  }>({ testing: false });
   const [isSaved, setIsSaved] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [showClearModal, setShowClearModal] = useState(false);
+  const [showTokenHelp, setShowTokenHelp] = useState(false);
 
-  const loadSettingsAndLogs = async () => {
+  const loadSettings = async () => {
     setLoading(true);
     try {
       const api = (window as any).electronAPI;
       if (!api) return;
 
-      const [settRes, logsRes] = await Promise.all([
-        api.getSettings(),
-        api.getAuditLogs()
-      ]);
-
+      const settRes = await api.getSettings();
       if (settRes.success && settRes.data) {
         setSettings(settRes.data);
-      }
-
-      if (logsRes.success && logsRes.data) {
-        setAuditLogs(logsRes.data || []);
       }
     } catch (err) {
       console.error('Failed to load settings:', err);
@@ -57,21 +52,18 @@ export const Settings: React.FC<SettingsProps> = ({ onNavigate, onRefreshGlobalS
   };
 
   useEffect(() => {
-    loadSettingsAndLogs();
+    loadSettings();
   }, []);
 
   const handleSaveSettings = async () => {
     try {
       const api = (window as any).electronAPI;
+      if (!api) return;
       const res = await api.saveSettings(settings);
       if (res.success) {
         setIsSaved(true);
-        setTimeout(() => setIsSaved(false), 2000);
-        soundManager.setMuted(!settings.sound_enabled);
+        setTimeout(() => setIsSaved(false), 2500);
         onRefreshGlobalStats();
-        // Refresh audit logs
-        const logsRes = await api.getAuditLogs();
-        if (logsRes.success) setAuditLogs(logsRes.data);
       }
     } catch (err: any) {
       alert(`Failed to save settings: ${err.message}`);
@@ -79,14 +71,19 @@ export const Settings: React.FC<SettingsProps> = ({ onNavigate, onRefreshGlobalS
   };
 
   const handleTestBotConnection = async () => {
-    if (!settings.discord_bot_token) {
-      setBotTestResult({ testing: false, success: false, message: 'Please enter a Discord Bot Token first.' });
+    if (!settings.discord_bot_token || !settings.discord_bot_token.trim()) {
+      setBotTestResult({ 
+        testing: false, 
+        success: false, 
+        message: 'Please enter a Discord Bot Token first.' 
+      });
       return;
     }
 
     setBotTestResult({ testing: true });
     try {
       const api = (window as any).electronAPI;
+      if (!api) return;
       const res = await api.testDiscordConnection(settings.discord_bot_token);
       if (res.success) {
         setBotTestResult({ 
@@ -94,307 +91,216 @@ export const Settings: React.FC<SettingsProps> = ({ onNavigate, onRefreshGlobalS
           success: true, 
           message: `Connected successfully! Bot User: ${res.botTag} (ID: ${res.botId})` 
         });
+        onRefreshGlobalStats();
       } else {
         setBotTestResult({ 
           testing: false, 
           success: false, 
-          message: `Connection failed: ${res.error}` 
+          message: res.error || 'Failed to authenticate with Discord API.' 
         });
       }
     } catch (err: any) {
-      setBotTestResult({ testing: false, success: false, message: err.message });
+      setBotTestResult({ 
+        testing: false, 
+        success: false, 
+        message: `Connection error: ${err.message}` 
+      });
     }
   };
 
-  const handleAddRule = () => {
-    if (!newRuleInput.trim()) return;
-    setSettings({
-      ...settings,
-      rules: [...settings.rules, newRuleInput.trim()]
-    });
-    setNewRuleInput('');
+  const handleClearDatabase = async () => {
+    try {
+      const api = (window as any).electronAPI;
+      if (!api) return;
+      await api.clearAllTeams();
+      setShowClearModal(false);
+      onRefreshGlobalStats();
+      alert('All teams, players, and logs have been cleared.');
+    } catch (err: any) {
+      alert(`Error clearing data: ${err.message}`);
+    }
   };
 
-  const handleRemoveRule = (index: number) => {
-    setSettings({
-      ...settings,
-      rules: settings.rules.filter((_, idx) => idx !== index)
-    });
-  };
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <RefreshCw className="w-8 h-8 text-blue-500 animate-spin" />
+      </div>
+    );
+  }
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto h-full">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/10">
+    <div className="flex flex-col h-full bg-[#090C14] text-slate-100 overflow-y-auto p-6 md:p-8">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8 pb-4 border-b border-slate-800">
         <div>
-          <h1 className="text-2xl font-extrabold text-white tracking-wide font-heading flex items-center gap-2">
-            <SettingsIcon className="text-emerald-400" size={26} />
-            SYSTEM CONFIGURATION & AUDIT LOGS
+          <h1 className="text-2xl font-bold flex items-center gap-3">
+            <SettingsIcon className="w-7 h-7 text-blue-400" />
+            Settings
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Configure rotation policies, manage secure Discord bot credentials, edit tournament rules, and review tamper-proof audit trails.
+            Configure your tournament details and Discord Bot connection
           </p>
         </div>
 
         <button
           onClick={handleSaveSettings}
-          className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 shadow-lg shadow-emerald-950/40 flex items-center gap-2 cursor-pointer transition-all"
+          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors shadow-lg shadow-blue-600/20"
         >
-          <Save size={16} />
-          <span>{isSaved ? 'Settings Saved!' : 'Save All Settings'}</span>
+          {isSaved ? (
+            <>
+              <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+              <span>Saved!</span>
+            </>
+          ) : (
+            <>
+              <Save className="w-4 h-4" />
+              <span>Save Settings</span>
+            </>
+          )}
         </button>
       </div>
 
-      {/* Grid: Tournament & Discord Settings */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Tournament Parameters */}
-        <div className="esports-card rounded-2xl border border-white/10 p-6 space-y-4 shadow-xl">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-white font-heading pb-2 border-b border-white/10 flex items-center gap-2">
-            <Shield size={16} className="text-emerald-400" />
-            Tournament & Rotation Policy
+      <div className="max-w-4xl space-y-6">
+        {/* Tournament General Settings */}
+        <div className="bg-[#121622] border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2 mb-4">
+            <Shield className="w-5 h-5 text-blue-400" />
+            General Tournament
           </h2>
 
-          <div className="space-y-4 text-xs">
+          <div className="space-y-4">
             <div>
-              <label className="text-slate-300 font-semibold block mb-1">
-                Tournament Title
+              <label className="block text-xs font-medium text-slate-400 mb-1">
+                Tournament Name
               </label>
               <input
                 type="text"
                 value={settings.tournament_name}
                 onChange={(e) => setSettings({ ...settings, tournament_name: e.target.value })}
-                className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-white/10 text-white focus:outline-none focus:border-emerald-500"
+                className="w-full px-4 py-2 bg-slate-900 border border-slate-700/70 rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition-colors"
+                placeholder="e.g. Free Fire Champions Cup"
               />
-            </div>
-
-            <div>
-              <label className="text-slate-300 font-semibold block mb-1">
-                Selection Target Count Per Draw
-              </label>
-              <input
-                type="number"
-                min={2}
-                max={48}
-                value={settings.selection_target}
-                onChange={(e) => setSettings({ ...settings, selection_target: parseInt(e.target.value, 10) || 12 })}
-                className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-white/10 text-white focus:outline-none focus:border-emerald-500 font-mono"
-              />
-              <span className="text-[11px] text-slate-500 mt-1 block">Default: 12 teams for standard Free Fire custom room lobbies.</span>
-            </div>
-
-            <div>
-              <label className="text-slate-300 font-semibold block mb-1">
-                Team Rotation Policy
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1.5">
-                <label 
-                  className={`p-3 rounded-xl border flex flex-col gap-1 cursor-pointer transition-colors ${
-                    settings.rotation_policy === 'one_time'
-                      ? 'bg-emerald-500/10 border-emerald-500/40 text-white'
-                      : 'bg-slate-900 border-white/5 text-slate-400'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-xs">One-Time Participation</span>
-                    <input
-                      type="radio"
-                      name="rotation"
-                      checked={settings.rotation_policy === 'one_time'}
-                      onChange={() => setSettings({ ...settings, rotation_policy: 'one_time' })}
-                      className="text-emerald-500"
-                    />
-                  </div>
-                  <span className="text-[10px] text-slate-400">
-                    Played teams are permanently excluded from subsequent draws until manual reset.
-                  </span>
-                </label>
-
-                <label 
-                  className={`p-3 rounded-xl border flex flex-col gap-1 cursor-pointer transition-colors ${
-                    settings.rotation_policy === 'recurring_cycle'
-                      ? 'bg-emerald-500/10 border-emerald-500/40 text-white'
-                      : 'bg-slate-900 border-white/5 text-slate-400'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-xs">Recurring Cycle</span>
-                    <input
-                      type="radio"
-                      name="rotation"
-                      checked={settings.rotation_policy === 'recurring_cycle'}
-                      onChange={() => setSettings({ ...settings, rotation_policy: 'recurring_cycle' })}
-                      className="text-emerald-500"
-                    />
-                  </div>
-                  <span className="text-[10px] text-slate-400">
-                    Rotates teams in round-robin batches, resetting eligibility when pool empties.
-                  </span>
-                </label>
-              </div>
-            </div>
-
-            <div className="pt-2">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.sound_enabled}
-                  onChange={(e) => setSettings({ ...settings, sound_enabled: e.target.checked })}
-                  className="w-4 h-4 rounded text-emerald-500 bg-slate-800 border-white/20"
-                />
-                <span className="font-semibold text-slate-300">
-                  Enable Web Audio API Spin Ticks & Victory Fanfare
-                </span>
-              </label>
             </div>
           </div>
         </div>
 
-        {/* Discord Bot Credentials */}
-        <div className="esports-card rounded-2xl border border-white/10 p-6 space-y-4 shadow-xl flex flex-col justify-between">
-          <div className="space-y-4">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-white font-heading pb-2 border-b border-white/10 flex items-center gap-2">
-              <Key size={16} className="text-teal-400" />
-              Secure Discord Bot Integration
+        {/* Discord Bot Configuration */}
+        <div className="bg-[#121622] border border-slate-800 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
+              <Key className="w-5 h-5 text-indigo-400" />
+              Discord Bot Connection
             </h2>
+            <button
+              onClick={() => setShowTokenHelp(!showTokenHelp)}
+              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
+            >
+              <HelpCircle className="w-4 h-4" />
+              {showTokenHelp ? 'Hide Bot Guide' : 'How to get Bot Token?'}
+            </button>
+          </div>
 
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="text-slate-300 font-semibold block mb-1">
-                  Discord Bot Token (Stored Securely in SQLite)
-                </label>
+          {/* Guide Dropdown */}
+          {showTokenHelp && (
+            <div className="mb-5 p-4 bg-indigo-950/30 border border-indigo-800/50 rounded-lg text-xs text-indigo-200 space-y-2 leading-relaxed">
+              <p className="font-semibold text-indigo-300">Quick Guide to Setup Discord Bot:</p>
+              <ol className="list-decimal list-inside space-y-1 text-slate-300">
+                <li>Go to the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer" className="text-indigo-400 underline inline-flex items-center gap-0.5">Discord Developer Portal <ExternalLink className="w-3 h-3" /></a>.</li>
+                <li>Create a "New Application" and give it a name (e.g. Tournament Bot).</li>
+                <li>Go to the <strong>Bot</strong> tab on the left menu, and click <strong>Reset Token</strong> to copy your Bot Token.</li>
+                <li>Scroll down to <strong>Privileged Gateway Intents</strong> and enable <strong>Server Members Intent</strong> and <strong>Message Content Intent</strong>.</li>
+                <li>Go to <strong>OAuth2 → URL Generator</strong>, select <code className="bg-slate-800 px-1 py-0.5 rounded">bot</code> and administrator / send messages permissions, copy the URL and invite the bot to your Discord server.</li>
+                <li>Paste the token below and click <strong>Test & Connect</strong>.</li>
+              </ol>
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">
+                Discord Bot Token
+              </label>
+              <div className="flex gap-3">
                 <input
                   type="password"
-                  placeholder="Paste bot token from Discord Developer Portal..."
                   value={settings.discord_bot_token}
                   onChange={(e) => setSettings({ ...settings, discord_bot_token: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-white/10 text-white focus:outline-none focus:border-teal-500 font-mono"
+                  className="flex-1 px-4 py-2 bg-slate-900 border border-slate-700/70 rounded-lg text-slate-200 font-mono text-sm focus:outline-none focus:border-indigo-500 transition-colors"
+                  placeholder="Paste your Discord Bot Token here..."
                 />
-                <span className="text-[11px] text-slate-500 mt-1 block">
-                  Tokens are never logged or exposed in renderer code. Minimum permissions: Direct Messages.
-                </span>
+                <button
+                  type="button"
+                  onClick={handleTestBotConnection}
+                  disabled={botTestResult.testing}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 whitespace-nowrap"
+                >
+                  {botTestResult.testing ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <Radio className="w-4 h-4" />
+                      Test & Connect
+                    </>
+                  )}
+                </button>
               </div>
-
-              <div>
-                <label className="text-slate-300 font-semibold block mb-1">
-                  Tournament Server (Guild) ID (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. 102938475610293847"
-                  value={settings.discord_guild_id || ''}
-                  onChange={(e) => setSettings({ ...settings, discord_guild_id: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-white/10 text-white focus:outline-none focus:border-teal-500 font-mono"
-                />
-              </div>
-
-              {botTestResult.message && (
-                <div className={`p-3 rounded-xl text-xs border ${
-                  botTestResult.success 
-                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
-                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                }`}>
-                  {botTestResult.message}
-                </div>
-              )}
             </div>
-          </div>
 
-          <div className="pt-4 border-t border-white/5 flex items-center justify-between">
-            <button
-              onClick={() => onNavigate('discord-notifications')}
-              className="text-xs text-teal-400 hover:text-teal-300 font-semibold"
-            >
-              View Setup Tutorial
-            </button>
-
-            <button
-              onClick={handleTestBotConnection}
-              disabled={botTestResult.testing}
-              className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center gap-2 cursor-pointer transition-colors"
-            >
-              <Radio size={14} className={botTestResult.testing ? 'animate-spin' : ''} />
-              <span>{botTestResult.testing ? 'Testing...' : 'Test Bot Connection'}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Tournament Rules Configuration */}
-      <div className="esports-card rounded-2xl border border-white/10 p-6 space-y-4 shadow-xl">
-        <h2 className="text-sm font-bold uppercase tracking-wider text-white font-heading pb-2 border-b border-white/10">
-          Tournament Rules & Match Guidelines
-        </h2>
-
-        <div className="space-y-2">
-          {settings.rules.map((rule, idx) => (
-            <div key={idx} className="p-3 rounded-xl bg-slate-900 border border-white/5 flex items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-3">
-                <span className="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 font-mono font-bold text-[10px] flex items-center justify-center">
-                  {idx + 1}
-                </span>
-                <span className="text-slate-200">{rule}</span>
-              </div>
-              <button
-                onClick={() => handleRemoveRule(idx)}
-                className="text-slate-400 hover:text-rose-400 p-1"
-                title="Remove rule"
+            {/* Test result message */}
+            {botTestResult.message && (
+              <div
+                className={`p-3 rounded-lg text-xs flex items-start gap-2.5 ${
+                  botTestResult.success
+                    ? 'bg-emerald-950/40 border border-emerald-800/60 text-emerald-300'
+                    : 'bg-rose-950/40 border border-rose-800/60 text-rose-300'
+                }`}
               >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
+                {botTestResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-rose-400" />
+                )}
+                <span>{botTestResult.message}</span>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Add new rule */}
-        <div className="flex items-center gap-2 pt-2">
-          <input
-            type="text"
-            placeholder="Add new tournament rule..."
-            value={newRuleInput}
-            onChange={(e) => setNewRuleInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleAddRule()}
-            className="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-white/10 text-xs text-white focus:outline-none focus:border-emerald-500"
-          />
+        {/* Database Management */}
+        <div className="bg-[#121622] border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2 mb-2">
+            <Trash2 className="w-5 h-5 text-rose-400" />
+            Data Management
+          </h2>
+          <p className="text-xs text-slate-400 mb-4">
+            Reset or clear tournament teams, players, and notification logs.
+          </p>
+
           <button
-            onClick={handleAddRule}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center gap-1 cursor-pointer"
+            onClick={() => setShowClearModal(true)}
+            className="px-4 py-2 bg-rose-900/30 hover:bg-rose-900/50 border border-rose-800/60 text-rose-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
           >
-            <Plus size={14} />
-            <span>Add Rule</span>
+            <Trash2 className="w-4 h-4" />
+            Clear All Teams & Logs
           </button>
         </div>
       </div>
 
-      {/* SQLite Audit Trail View */}
-      <div className="esports-card rounded-2xl border border-white/10 p-6 space-y-4 shadow-xl">
-        <div className="flex items-center justify-between pb-2 border-b border-white/10">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-white font-heading flex items-center gap-2">
-            <History size={16} className="text-purple-400" />
-            Administrative Audit Trail (Persistent SQLite)
-          </h2>
-          <span className="text-xs text-slate-400">{auditLogs.length} events logged</span>
-        </div>
-
-        <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
-          {auditLogs.map((log) => (
-            <div key={log.id} className="p-2.5 rounded-xl bg-slate-900/60 border border-white/5 flex items-start gap-3 text-xs">
-              <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-800 text-purple-300 uppercase shrink-0">
-                {log.action}
-              </span>
-              <div className="flex-1 truncate">
-                <span className="text-slate-200 block truncate">{log.details}</span>
-                <span className="text-[10px] text-slate-500">{formatDate(log.timestamp)}</span>
-              </div>
-            </div>
-          ))}
-
-          {auditLogs.length === 0 && (
-            <div className="py-8 text-center text-slate-500 text-xs">
-              No audit logs recorded yet.
-            </div>
-          )}
-        </div>
-      </div>
+      {/* Confirmation Modal for Clearing Database */}
+      <ConfirmationModal
+        isOpen={showClearModal}
+        title="Clear All Teams & Logs?"
+        message="This will permanently delete all imported teams, players, and DM notification logs from the local database. This action cannot be undone."
+        confirmLabel="Yes, Clear Everything"
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={handleClearDatabase}
+        onCancel={() => setShowClearModal(false)}
+      />
     </div>
   );
 };
